@@ -2,6 +2,7 @@
 
 from typing import Tuple
 
+import torch
 from jaxtyping import Float
 from torch import Tensor
 from torch.autograd import Function
@@ -141,6 +142,77 @@ class ProjectGaussians(Function):
             v_conics,
         )
 
+        if viewmat.requires_grad:
+            v_viewmat = torch.zeros_like(viewmat)
+            R = viewmat[..., :3, :3]
+
+            # Approximate gradient for f(.) = loss(F(ProjectGaussians(.))).
+            # Denote:
+            #
+            #   f(viewmat, means3d, ...) =
+            #       g(p_view(viewmat, means3d),
+            #         cov2d(viewmat, means3d, ...), ...)
+            #
+            # The derivative w.r.t. the element (i,j) of the view matrix
+            # (viewmat[i, j] := vij) is
+            #
+            #   v_viewmat[i, j] := d f / d vij = \sum_k (
+            #       \sum_l d g / d p_view[k, l] * d p_view[k, l] / d vij +
+            #       \sum_lm d g / d cov2d[k, l, m] * d cov2d[k, l, m] / d vij
+            #   )
+            #
+            # In the context of fine tuning camera poses, it is reasonable to
+            # assume that the projected shapes of the Gaussians (cov2d) are
+            # rather insensitive to small perturbations of the poses, when
+            # compared to the means of Gaussians in camera coordinates:
+            #
+            #   p_view(viewmat, means3d)[k, j]
+            #     = (viewmat[:3, :3] @ means3d[k, :]^T + viewmat[:3, 3])^T[j]
+            #     =: (R @ means3d[k, :]^T + t)^T[j]
+            #     = (means3d[k, :] @ R^T + t^T)[j]
+            #     = \sum_l means3d[k, l] * R[j, l] + t[j]
+            #
+            # That is:
+            #
+            #   d f / d vij =: v_viewmat[i, j]
+            #       =~ \sum_k dot(d g / d p_view[k, :], d p_view[k, :] / d vij)
+            #       =: \sum_k dot(v_mean3d_cam[k, :], d p_view[k, :] / d vij)
+            #
+            # and
+            #
+            #   v_mean3d[k, i] := d f / d mean3d[k, i]
+            #       =~ \sum_j d g / d p_view[k, j] * d p_view[k, j] / d mean3d[k, i]
+            #       = \sum_j d g / d p_view[k, j] * R[j, i]
+            #       = dot(d g / d p_view[k, :] * R[:, i])
+            #       = (v_mean3d_cam[k, :] @ R)[i]
+            #
+            #   => v_mean3d_cam[k, :] =~ v_mean3d[k, :] @ R^T
+            #
+            v_mean3d_cam = torch.matmul(v_mean3d, R.transpose(-1, -2))
+
+            # gradient w.r.t. view matrix translation
+            #
+            #   d p_view[k, i] / d t[j] = delta_ij
+            #   => d p_view[k, :] / dt = I
+            #   => d f / d t = \sum_k v_mean_cam[k, :]
+            #
+            v_viewmat[..., :3, 3] = v_mean3d_cam.sum(-2)
+
+            # gradent w.r.t. view matrix rotation
+            #
+            #   d p_view[k, i] / d R[j, l] = means3d[k, l] * delta_ij
+            #
+            # => d f / d v R[j, l]
+            #   = \sum_k dot(v_mean3d_cam[k, :], d p_view[k, :] / d R[j, l])
+            #   = \sum_ik v_mean3d_cam[k, i] * means3d[k, l] * delta_ij
+            #   = \sum_k v_mean3d_cam[k, j] * means3d[k, l]
+            #
+            for j in range(3):
+                for l in range(3):
+                    v_viewmat[..., j, l] = torch.dot(v_mean3d_cam[..., j], means3d[..., l])
+        else:
+            v_viewmat = None
+
         # Return a gradient for each input.
         return (
             # means3d: Float[Tensor, "*batch 3"],
@@ -152,7 +224,7 @@ class ProjectGaussians(Function):
             # quats: Float[Tensor, "*batch 4"],
             v_quat,
             # viewmat: Float[Tensor, "4 4"],
-            None,
+            v_viewmat,
             # projmat: Float[Tensor, "4 4"],
             None,
             # fx: float,
