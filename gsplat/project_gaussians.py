@@ -2,6 +2,7 @@
 
 from typing import Tuple
 
+import math
 import torch
 from jaxtyping import Float
 from torch import Tensor
@@ -9,6 +10,25 @@ from torch.autograd import Function
 
 import gsplat.cuda as _C
 
+def projection_matrix(znear, zfar, fovx, fovy, device):
+    """
+    Constructs an OpenGL-style perspective projection matrix.
+    """
+    t = znear * math.tan(0.5 * fovy)
+    b = -t
+    r = znear * math.tan(0.5 * fovx)
+    l = -r
+    n = znear
+    f = zfar
+    return torch.tensor(
+        [
+            [2 * n / (r - l), 0.0, (r + l) / (r - l), 0.0],
+            [0.0, 2 * n / (t - b), (t + b) / (t - b), 0.0],
+            [0.0, 0.0, (f + n) / (f - n), -1.0 * f * n / (f - n)],
+            [0.0, 0.0, 1.0, 0.0],
+        ],
+        device=device,
+    )
 
 class ProjectGaussians(Function):
     """This function projects 3D gaussians to 2D using the EWA splatting method for gaussian splatting.
@@ -46,7 +66,6 @@ class ProjectGaussians(Function):
         glob_scale: float,
         quats: Float[Tensor, "*batch 4"],
         viewmat: Float[Tensor, "4 4"],
-        projmat: Float[Tensor, "4 4"],
         fx: float,
         fy: float,
         cx: float,
@@ -57,6 +76,13 @@ class ProjectGaussians(Function):
         clip_thresh: float = 0.01,
     ):
         num_points = means3d.shape[-2]
+
+        Z_NEAR = 0.001
+        Z_FAR = 1000
+        fovx = 2 * math.atan(img_width / (2 * fx))
+        fovy = 2 * math.atan(img_height / (2 * fy))
+        projmat_proj_only = projection_matrix(Z_NEAR, Z_FAR, fovx, fovy, device=viewmat.device)
+        projmat = projmat_proj_only @ torch.cat((viewmat, torch.tensor([[0, 0, 0, 1]]).to(viewmat.device)), dim=0)
 
         (
             cov3d,
@@ -225,8 +251,6 @@ class ProjectGaussians(Function):
             v_quat,
             # viewmat: Float[Tensor, "4 4"],
             v_viewmat,
-            # projmat: Float[Tensor, "4 4"],
-            None,
             # fx: float,
             None,
             # fy: float,
