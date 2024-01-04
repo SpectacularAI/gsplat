@@ -81,8 +81,7 @@ class ProjectGaussians(Function):
         Z_FAR = 1000
         fovx = 2 * math.atan(img_width / (2 * fx))
         fovy = 2 * math.atan(img_height / (2 * fy))
-        projmat_proj_only = projection_matrix(Z_NEAR, Z_FAR, fovx, fovy, device=viewmat.device)
-        projmat = projmat_proj_only @ torch.cat((viewmat, torch.tensor([[0, 0, 0, 1]]).to(viewmat.device)), dim=0)
+        projmat = projection_matrix(Z_NEAR, Z_FAR, fovx, fovy, device=viewmat.device)
 
         (
             cov3d,

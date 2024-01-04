@@ -75,7 +75,7 @@ __global__ void project_gaussians_forward_kernel(
     conics[idx] = conic;
 
     // compute the projected mean
-    float2 center = project_pix(projmat, p_world, img_size, {cx, cy});
+    float2 center = project_pix(projmat, p_view, img_size, {cx, cy});
     uint2 tile_min, tile_max;
     get_tile_bbox(center, radius, tile_bounds, tile_min, tile_max);
     int32_t tile_area = (tile_max.x - tile_min.x) * (tile_max.y - tile_min.y);
