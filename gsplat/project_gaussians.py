@@ -10,26 +10,6 @@ from torch.autograd import Function
 
 import gsplat.cuda as _C
 
-def projection_matrix(znear, zfar, fovx, fovy, device):
-    """
-    Constructs an OpenGL-style perspective projection matrix.
-    """
-    t = znear * math.tan(0.5 * fovy)
-    b = -t
-    r = znear * math.tan(0.5 * fovx)
-    l = -r
-    n = znear
-    f = zfar
-    return torch.tensor(
-        [
-            [2 * n / (r - l), 0.0, (r + l) / (r - l), 0.0],
-            [0.0, 2 * n / (t - b), (t + b) / (t - b), 0.0],
-            [0.0, 0.0, (f + n) / (f - n), -1.0 * f * n / (f - n)],
-            [0.0, 0.0, 1.0, 0.0],
-        ],
-        device=device,
-    )
-
 class ProjectGaussians(Function):
     """This function projects 3D gaussians to 2D using the EWA splatting method for gaussian splatting.
 
@@ -77,12 +57,6 @@ class ProjectGaussians(Function):
     ):
         num_points = means3d.shape[-2]
 
-        Z_NEAR = 0.001
-        Z_FAR = 1000
-        fovx = 2 * math.atan(img_width / (2 * fx))
-        fovy = 2 * math.atan(img_height / (2 * fy))
-        projmat = projection_matrix(Z_NEAR, Z_FAR, fovx, fovy, device=viewmat.device)
-
         (
             cov3d,
             xys,
@@ -97,7 +71,6 @@ class ProjectGaussians(Function):
             glob_scale,
             quats,
             viewmat,
-            projmat,
             fx,
             fy,
             cx,
@@ -124,7 +97,6 @@ class ProjectGaussians(Function):
             scales,
             quats,
             viewmat,
-            projmat,
             cov3d,
             radii,
             conics,
@@ -139,7 +111,6 @@ class ProjectGaussians(Function):
             scales,
             quats,
             viewmat,
-            projmat,
             cov3d,
             radii,
             conics,
@@ -152,7 +123,6 @@ class ProjectGaussians(Function):
             ctx.glob_scale,
             quats,
             viewmat,
-            projmat,
             ctx.fx,
             ctx.fy,
             ctx.cx,
