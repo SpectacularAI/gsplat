@@ -1,6 +1,6 @@
 """Python bindings for 3D gaussian projection"""
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import math
 import torch
@@ -19,7 +19,7 @@ class ProjectGaussians(Function):
        glob_scale (float): A global scaling factor applied to the scene.
        quats (Tensor): rotations in quaternion [w,x,y,z] format.
        viewmat (Tensor): view matrix for rendering.
-       projmat (Tensor): projection matrix for rendering.
+       projmat (Tensor): DEPRECATED and ignored. Set to None
        fx (float): focal length x.
        fy (float): focal length y.
        img_height (int): height of the rendered image.
@@ -46,6 +46,7 @@ class ProjectGaussians(Function):
         glob_scale: float,
         quats: Float[Tensor, "*batch 4"],
         viewmat: Float[Tensor, "4 4"],
+        projmat: Optional[Float[Tensor, "4 4"]],
         fx: float,
         fy: float,
         cx: float,
@@ -220,6 +221,8 @@ class ProjectGaussians(Function):
             v_quat,
             # viewmat: Float[Tensor, "4 4"],
             v_viewmat,
+            # projmat: Float[Tensor, "4 4"],
+            None,
             # fx: float,
             None,
             # fy: float,
