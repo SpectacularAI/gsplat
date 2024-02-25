@@ -702,8 +702,6 @@ std::
         torch::zeros({num_points, channels}, xys.options());
     torch::Tensor v_opacity = torch::zeros({num_points, 1}, xys.options());
 
-    // TODO: populate v_pix_vels
-
     rasterize_backward_kernel<<<tile_bounds, block>>>(
         tile_bounds,
         img_size,
@@ -723,6 +721,7 @@ std::
         (float3 *)v_output.contiguous().data_ptr<float>(),
         v_output_alpha.contiguous().data_ptr<float>(),
         (float2 *)v_xy.contiguous().data_ptr<float>(),
+        (float2 *)v_pix_vels.contiguous().data_ptr<float>(),
         (float3 *)v_conic.contiguous().data_ptr<float>(),
         (float3 *)v_colors.contiguous().data_ptr<float>(),
         v_opacity.contiguous().data_ptr<float>()

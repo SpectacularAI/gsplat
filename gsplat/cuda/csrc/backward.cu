@@ -158,6 +158,7 @@ __global__ void rasterize_backward_kernel(
     const float3* __restrict__ v_output,
     const float* __restrict__ v_output_alpha,
     float2* __restrict__ v_xy,
+    float2* __restrict__ v_pix_vels,
     float3* __restrict__ v_conic,
     float3* __restrict__ v_rgb,
     float* __restrict__ v_opacity
@@ -281,7 +282,7 @@ __global__ void rasterize_backward_kernel(
                 float3 v_rgb_local = {0.f, 0.f, 0.f};
                 float3 v_conic_local = {0.f, 0.f, 0.f};
                 float2 v_xy_local = {0.f, 0.f};
-                // TODO: v_pix_vel_local
+                float2 v_pix_vel_local = {0.f, 0.f};
                 float v_opacity_local = 0.f;
                 //initialize everything to 0, only set if the lane is valid
                 if(valid){
@@ -311,12 +312,19 @@ __global__ void rasterize_backward_kernel(
                     buffer.z += rgb.z * fac;
 
                     const float v_sigma = -opac * vis * v_alpha;
-                    v_conic_local = {0.5f * v_sigma * delta.x * delta.x,
-                                            0.5f * v_sigma * delta.x * delta.y,
-                                            0.5f * v_sigma * delta.y * delta.y};
-                    v_xy_local = {v_sigma * (conic.x * delta.x + conic.y * delta.y),
-                                        v_sigma * (conic.y * delta.x + conic.z * delta.y)};
-                    v_opacity_local = vis * v_alpha;
+                    v_conic_local.x += 0.5f * v_sigma * delta.x * delta.x;
+                    v_conic_local.y += 0.5f * v_sigma * delta.x * delta.y;
+                    v_conic_local.z += 0.5f * v_sigma * delta.y * delta.y;
+
+                    float2 v_xy_cur = {
+                        v_sigma * (conic.x * delta.x + conic.y * delta.y),
+                        v_sigma * (conic.y * delta.x + conic.z * delta.y)
+                    };
+                    v_xy_local.x += v_xy_cur.x;
+                    v_xy_local.y += v_xy_cur.y;
+                    v_pix_vel_local.x += v_xy_cur.x * blur_rel;
+                    v_pix_vel_local.y += v_xy_cur.y * blur_rel;
+                    v_opacity_local += vis * v_alpha;
                 }
                 warpSum3(v_rgb_local, warp);
                 warpSum3(v_conic_local, warp);
@@ -337,6 +345,10 @@ __global__ void rasterize_backward_kernel(
                     float* v_xy_ptr = (float*)(v_xy);
                     atomicAdd(v_xy_ptr + 2*g + 0, v_xy_local.x);
                     atomicAdd(v_xy_ptr + 2*g + 1, v_xy_local.y);
+
+                    float* v_pix_vel_ptr = (float*)(v_pix_vels);
+                    atomicAdd(v_pix_vel_ptr + 2*g + 0, v_pix_vel_local.x);
+                    atomicAdd(v_pix_vel_ptr + 2*g + 1, v_pix_vel_local.y);
 
                     atomicAdd(v_opacity + g, v_opacity_local);
                 }
