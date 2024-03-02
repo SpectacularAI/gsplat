@@ -126,6 +126,7 @@ std::tuple<
     torch::Tensor,
     torch::Tensor,
     torch::Tensor,
+    torch::Tensor,
     torch::Tensor>
 project_gaussians_forward_tensor(
     const int num_points,
@@ -133,6 +134,10 @@ project_gaussians_forward_tensor(
     torch::Tensor &scales,
     const float glob_scale,
     torch::Tensor &quats,
+    const std::tuple<float, float, float> linear_velocity,
+    const std::tuple<float, float, float> angular_velocity,
+    const float rolling_shutter_time,
+    const float exposure_time,
     torch::Tensor &viewmat,
     const float fx,
     const float fy,
@@ -155,6 +160,18 @@ project_gaussians_forward_tensor(
 
     float4 intrins = {fx, fy, cx, cy};
 
+    float3 linear_velocity_float3 = {
+        std::get<0>(linear_velocity),
+        std::get<1>(linear_velocity),
+        std::get<2>(linear_velocity),
+    };
+
+    float3 angular_velocity_float3 = {
+        std::get<0>(angular_velocity),
+        std::get<1>(angular_velocity),
+        std::get<2>(angular_velocity),
+    };
+
     // Triangular covariance.
     torch::Tensor cov3d_d =
         torch::zeros({num_points, 6}, means3d.options().dtype(torch::kFloat32));
@@ -162,6 +179,8 @@ project_gaussians_forward_tensor(
         torch::zeros({num_points, 2}, means3d.options().dtype(torch::kFloat32));
     torch::Tensor depths_d =
         torch::zeros({num_points}, means3d.options().dtype(torch::kFloat32));
+    torch::Tensor pix_vels_d =
+        torch::zeros({num_points, 2}, means3d.options().dtype(torch::kFloat32));
     torch::Tensor radii_d =
         torch::zeros({num_points}, means3d.options().dtype(torch::kInt32));
     torch::Tensor conics_d =
@@ -179,6 +198,10 @@ project_gaussians_forward_tensor(
         (float3 *)scales.contiguous().data_ptr<float>(),
         glob_scale,
         (float4 *)quats.contiguous().data_ptr<float>(),
+        linear_velocity_float3,
+        angular_velocity_float3,
+        rolling_shutter_time,
+        exposure_time,
         viewmat.contiguous().data_ptr<float>(),
         intrins,
         img_size_dim3,
@@ -189,6 +212,7 @@ project_gaussians_forward_tensor(
         cov3d_d.contiguous().data_ptr<float>(),
         (float2 *)xys_d.contiguous().data_ptr<float>(),
         depths_d.contiguous().data_ptr<float>(),
+        (float2 *)pix_vels_d.contiguous().data_ptr<float>(),
         radii_d.contiguous().data_ptr<int>(),
         (float3 *)conics_d.contiguous().data_ptr<float>(),
         compensation_d.contiguous().data_ptr<float>(),
@@ -196,7 +220,7 @@ project_gaussians_forward_tensor(
     );
 
     return std::make_tuple(
-        cov3d_d, xys_d, depths_d, radii_d, conics_d, compensation_d, num_tiles_hit_d
+        cov3d_d, xys_d, depths_d, pix_vels_d, radii_d, conics_d, compensation_d, num_tiles_hit_d
     );
 }
 
@@ -212,6 +236,10 @@ project_gaussians_backward_tensor(
     torch::Tensor &scales,
     const float glob_scale,
     torch::Tensor &quats,
+    const std::tuple<float, float, float> linear_velocity,
+    const std::tuple<float, float, float> angular_velocity,
+    const float rolling_shutter_time,
+    const float exposure_time,
     torch::Tensor &viewmat,
     const float fx,
     const float fy,
@@ -224,6 +252,7 @@ project_gaussians_backward_tensor(
     torch::Tensor &conics,
     torch::Tensor &v_xy,
     torch::Tensor &v_depth,
+    torch::Tensor &v_pix_vel,
     torch::Tensor &v_conic
 ) {
     DEVICE_GUARD(means3d);
@@ -232,6 +261,18 @@ project_gaussians_backward_tensor(
     img_size_dim3.y = img_height;
 
     float4 intrins = {fx, fy, cx, cy};
+
+    float3 linear_velocity_float3 = {
+        std::get<0>(linear_velocity),
+        std::get<1>(linear_velocity),
+        std::get<2>(linear_velocity),
+    };
+
+    float3 angular_velocity_float3 = {
+        std::get<0>(angular_velocity),
+        std::get<1>(angular_velocity),
+        std::get<2>(angular_velocity),
+    };
 
     const auto num_cov3d = num_points * 6;
 
@@ -255,6 +296,10 @@ project_gaussians_backward_tensor(
         (float3 *)scales.contiguous().data_ptr<float>(),
         glob_scale,
         (float4 *)quats.contiguous().data_ptr<float>(),
+        linear_velocity_float3,
+        angular_velocity_float3,
+        rolling_shutter_time,
+        exposure_time,
         viewmat.contiguous().data_ptr<float>(),
         intrins,
         img_size_dim3,
@@ -263,6 +308,7 @@ project_gaussians_backward_tensor(
         (float3 *)conics.contiguous().data_ptr<float>(),
         (float2 *)v_xy.contiguous().data_ptr<float>(),
         v_depth.contiguous().data_ptr<float>(),
+        (float2 *)v_pix_vel.contiguous().data_ptr<float>(),
         (float3 *)v_conic.contiguous().data_ptr<float>(),
         // Outputs.
         (float3 *)v_cov2d.contiguous().data_ptr<float>(),
@@ -344,9 +390,11 @@ rasterize_forward_tensor(
     const std::tuple<int, int, int> tile_bounds,
     const std::tuple<int, int, int> block,
     const std::tuple<int, int, int> img_size,
+    const unsigned n_blur_samples,
     const torch::Tensor &gaussian_ids_sorted,
     const torch::Tensor &tile_bins,
     const torch::Tensor &xys,
+    const torch::Tensor &pix_vels,
     const torch::Tensor &conics,
     const torch::Tensor &colors,
     const torch::Tensor &opacities,
@@ -356,10 +404,14 @@ rasterize_forward_tensor(
     CHECK_INPUT(gaussian_ids_sorted);
     CHECK_INPUT(tile_bins);
     CHECK_INPUT(xys);
+    CHECK_INPUT(pix_vels);
     CHECK_INPUT(conics);
     CHECK_INPUT(colors);
     CHECK_INPUT(opacities);
     CHECK_INPUT(background);
+    TORCH_CHECK(
+        n_blur_samples > 0 && n_blur_samples <= MAX_BLUR_SAMPLES,
+        "unsupported blur size");
 
     dim3 tile_bounds_dim3;
     tile_bounds_dim3.x = std::get<0>(tile_bounds);
@@ -384,18 +436,20 @@ rasterize_forward_tensor(
         {img_height, img_width, channels}, xys.options().dtype(torch::kFloat32)
     );
     torch::Tensor final_Ts = torch::zeros(
-        {img_height, img_width}, xys.options().dtype(torch::kFloat32)
+        {img_height, img_width, n_blur_samples}, xys.options().dtype(torch::kFloat32)
     );
     torch::Tensor final_idx = torch::zeros(
-        {img_height, img_width}, xys.options().dtype(torch::kInt32)
+        {img_height, img_width, n_blur_samples}, xys.options().dtype(torch::kInt32)
     );
 
     rasterize_forward<<<tile_bounds_dim3, block_dim3>>>(
         tile_bounds_dim3,
         img_size_dim3,
+        n_blur_samples,
         gaussian_ids_sorted.contiguous().data_ptr<int32_t>(),
         (int2 *)tile_bins.contiguous().data_ptr<int>(),
         (float2 *)xys.contiguous().data_ptr<float>(),
+        (float2 *)pix_vels.contiguous().data_ptr<float>(),
         (float3 *)conics.contiguous().data_ptr<float>(),
         (float3 *)colors.contiguous().data_ptr<float>(),
         opacities.contiguous().data_ptr<float>(),
@@ -414,9 +468,11 @@ nd_rasterize_forward_tensor(
     const std::tuple<int, int, int> tile_bounds,
     const std::tuple<int, int, int> block,
     const std::tuple<int, int, int> img_size,
+    const unsigned n_blur_samples,
     const torch::Tensor &gaussian_ids_sorted,
     const torch::Tensor &tile_bins,
     const torch::Tensor &xys,
+    const torch::Tensor &pix_vels,
     const torch::Tensor &conics,
     const torch::Tensor &colors,
     const torch::Tensor &opacities,
@@ -430,6 +486,8 @@ nd_rasterize_forward_tensor(
     CHECK_INPUT(colors);
     CHECK_INPUT(opacities);
     CHECK_INPUT(background);
+    (void)pix_vels;
+    TORCH_CHECK(n_blur_samples == 1, "blur not supported here");
 
     dim3 tile_bounds_dim3;
     tile_bounds_dim3.x = std::get<0>(tile_bounds);
@@ -489,6 +547,7 @@ nd_rasterize_forward_tensor(
 std::
     tuple<
         torch::Tensor, // dL_dxy
+        torch::Tensor, // dL dpix_vels
         torch::Tensor, // dL_dconic
         torch::Tensor, // dL_dcolors
         torch::Tensor  // dL_dopacity
@@ -497,9 +556,11 @@ std::
         const unsigned img_height,
         const unsigned img_width,
         const unsigned block_width,
+        const unsigned n_blur_samples,
         const torch::Tensor &gaussians_ids_sorted,
         const torch::Tensor &tile_bins,
         const torch::Tensor &xys,
+        const torch::Tensor &pix_vels,
         const torch::Tensor &conics,
         const torch::Tensor &colors,
         const torch::Tensor &opacities,
@@ -512,6 +573,8 @@ std::
     DEVICE_GUARD(xys);
     CHECK_INPUT(xys);
     CHECK_INPUT(colors);
+    (void)pix_vels;
+    TORCH_CHECK(n_blur_samples == 1, "blur not supported here");
 
     if (xys.ndimension() != 2 || xys.size(1) != 2) {
         AT_ERROR("xys must have dimensions (num_points, 2)");
@@ -532,6 +595,7 @@ std::
     const int channels = colors.size(1);
 
     torch::Tensor v_xy = torch::zeros({num_points, 2}, xys.options());
+    torch::Tensor v_pix_vels = torch::zeros({num_points, 2}, xys.options());
     torch::Tensor v_conic = torch::zeros({num_points, 3}, xys.options());
     torch::Tensor v_colors =
         torch::zeros({num_points, channels}, xys.options());
@@ -550,6 +614,7 @@ std::
         gaussians_ids_sorted.contiguous().data_ptr<int>(),
         (int2 *)tile_bins.contiguous().data_ptr<int>(),
         (float2 *)xys.contiguous().data_ptr<float>(),
+        (float2 *)pix_vels.contiguous().data_ptr<float>(),
         (float3 *)conics.contiguous().data_ptr<float>(),
         colors.contiguous().data_ptr<float>(),
         opacities.contiguous().data_ptr<float>(),
@@ -564,12 +629,13 @@ std::
         v_opacity.contiguous().data_ptr<float>()
     );
 
-    return std::make_tuple(v_xy, v_conic, v_colors, v_opacity);
+    return std::make_tuple(v_xy, v_pix_vels, v_conic, v_colors, v_opacity);
 }
 
 std::
     tuple<
         torch::Tensor, // dL_dxy
+        torch::Tensor, // dL dpix_vels
         torch::Tensor, // dL_dconic
         torch::Tensor, // dL_dcolors
         torch::Tensor  // dL_dopacity
@@ -578,9 +644,11 @@ std::
         const unsigned img_height,
         const unsigned img_width,
         const unsigned block_width,
+        const unsigned n_blur_samples,
         const torch::Tensor &gaussians_ids_sorted,
         const torch::Tensor &tile_bins,
         const torch::Tensor &xys,
+        const torch::Tensor &pix_vels,
         const torch::Tensor &conics,
         const torch::Tensor &colors,
         const torch::Tensor &opacities,
@@ -593,6 +661,9 @@ std::
     DEVICE_GUARD(xys);
     CHECK_INPUT(xys);
     CHECK_INPUT(colors);
+    TORCH_CHECK(
+        n_blur_samples > 0 && n_blur_samples <= MAX_BLUR_SAMPLES,
+        "unsupported blur size");
 
     if (xys.ndimension() != 2 || xys.size(1) != 2) {
         AT_ERROR("xys must have dimensions (num_points, 2)");
@@ -613,17 +684,22 @@ std::
     const int channels = colors.size(1);
 
     torch::Tensor v_xy = torch::zeros({num_points, 2}, xys.options());
+    torch::Tensor v_pix_vels = torch::zeros({num_points, 2}, xys.options());
     torch::Tensor v_conic = torch::zeros({num_points, 3}, xys.options());
     torch::Tensor v_colors =
         torch::zeros({num_points, channels}, xys.options());
     torch::Tensor v_opacity = torch::zeros({num_points, 1}, xys.options());
 
+    // TODO: populate v_pix_vels
+
     rasterize_backward_kernel<<<tile_bounds, block>>>(
         tile_bounds,
         img_size,
+        n_blur_samples,
         gaussians_ids_sorted.contiguous().data_ptr<int>(),
         (int2 *)tile_bins.contiguous().data_ptr<int>(),
         (float2 *)xys.contiguous().data_ptr<float>(),
+        (float2 *)pix_vels.contiguous().data_ptr<float>(),
         (float3 *)conics.contiguous().data_ptr<float>(),
         (float3 *)colors.contiguous().data_ptr<float>(),
         opacities.contiguous().data_ptr<float>(),
@@ -638,5 +714,5 @@ std::
         v_opacity.contiguous().data_ptr<float>()
     );
 
-    return std::make_tuple(v_xy, v_conic, v_colors, v_opacity);
+    return std::make_tuple(v_xy, v_pix_vels, v_conic, v_colors, v_opacity);
 }

@@ -15,8 +15,11 @@ def project_gaussians(
     scales: Float[Tensor, "*batch 3"],
     glob_scale: float,
     quats: Float[Tensor, "*batch 4"],
+    linear_velocity: Optional[Float[Tensor, "3"]],
+    angular_velocity: Optional[Float[Tensor, "3"]],
+    rolling_shutter_time: float,
+    exposure_time: float,
     viewmat: Float[Tensor, "4 4"],
-    projmat: Optional[Float[Tensor, "4 4"]],
     fx: float,
     fy: float,
     cx: float,
@@ -25,7 +28,7 @@ def project_gaussians(
     img_width: int,
     block_width: int,
     clip_thresh: float = 0.01,
-) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     """This function projects 3D gaussians to 2D using the EWA splatting method for gaussian splatting.
 
     Note:
@@ -36,8 +39,10 @@ def project_gaussians(
        scales (Tensor): scales of the gaussians.
        glob_scale (float): A global scaling factor applied to the scene.
        quats (Tensor): rotations in quaternion [w,x,y,z] format.
+       linear_velocity (Tuple): Camera linear velocity in camera coordinates (scene units / s)
+       angular_velocity (Tuple): Camera angular velocity in camera coordinates (scene units / s)
+       rolling_shutter_time (float): rollings shutter roll time, seconds
        viewmat (Tensor): view matrix for rendering.
-       projmat (Tensor): DEPRECATED and ignored. Set to None
        fx (float): focal length x.
        fy (float): focal length y.
        cx (float): principal point x.
@@ -52,6 +57,7 @@ def project_gaussians(
 
         - **xys** (Tensor): x,y locations of 2D gaussian projections.
         - **depths** (Tensor): z depth of gaussians.
+        - **pix_vels** (Tensor): pixel velocities
         - **radii** (Tensor): radii of 2D gaussian projections.
         - **conics** (Tensor): conic parameters for 2D gaussian.
         - **compensation** (Tensor): the density compensation for blurring 2D kernel
@@ -59,13 +65,28 @@ def project_gaussians(
         - **cov3d** (Tensor): 3D covariances.
     """
     assert block_width > 1 and block_width <= 16, "block_width must be between 2 and 16"
+
+    if linear_velocity is None:
+        assert angular_velocity is None
+        assert rolling_shutter_time == 0
+        v_lin = (0, 0, 0)
+        v_ang = (0, 0, 0)
+    else:
+        import numpy as np
+        assert angular_velocity is not None
+        v_lin = tuple(np.ravel(linear_velocity.tolist()))
+        v_ang = tuple(np.ravel(angular_velocity.tolist()))
+
     return _ProjectGaussians.apply(
         means3d.contiguous(),
         scales.contiguous(),
         glob_scale,
         quats.contiguous(),
+        v_lin,
+        v_ang,
+        rolling_shutter_time,
+        exposure_time,
         viewmat.contiguous(),
-        None,
         fx,
         fy,
         cx,
@@ -87,8 +108,11 @@ class _ProjectGaussians(Function):
         scales: Float[Tensor, "*batch 3"],
         glob_scale: float,
         quats: Float[Tensor, "*batch 4"],
+        linear_velocity: Tuple[float, float, float],
+        angular_velocity: Tuple[float, float, float],
+        rolling_shutter_time: float,
+        exposure_time: float,
         viewmat: Float[Tensor, "4 4"],
-        projmat: Optional[Float[Tensor, "4 4"]],
         fx: float,
         fy: float,
         cx: float,
@@ -106,6 +130,7 @@ class _ProjectGaussians(Function):
             cov3d,
             xys,
             depths,
+            pix_vels,
             radii,
             conics,
             compensation,
@@ -116,6 +141,10 @@ class _ProjectGaussians(Function):
             scales,
             glob_scale,
             quats,
+            linear_velocity,
+            angular_velocity,
+            rolling_shutter_time,
+            exposure_time,
             viewmat,
             fx,
             fy,
@@ -136,6 +165,10 @@ class _ProjectGaussians(Function):
         ctx.fy = fy
         ctx.cx = cx
         ctx.cy = cy
+        ctx.linear_velocity = linear_velocity
+        ctx.angular_velocity = angular_velocity
+        ctx.rolling_shutter_time = rolling_shutter_time
+        ctx.exposure_time = exposure_time
 
         # Save tensors.
         ctx.save_for_backward(
@@ -148,13 +181,14 @@ class _ProjectGaussians(Function):
             conics,
         )
 
-        return (xys, depths, radii, conics, compensation, num_tiles_hit, cov3d)
+        return (xys, depths, pix_vels, radii, conics, compensation, num_tiles_hit, cov3d)
 
     @staticmethod
     def backward(
         ctx,
         v_xys,
         v_depths,
+        v_pix_vels,
         v_radii,
         v_conics,
         v_compensation,
@@ -177,6 +211,10 @@ class _ProjectGaussians(Function):
             scales,
             ctx.glob_scale,
             quats,
+            ctx.linear_velocity,
+            ctx.angular_velocity,
+            ctx.rolling_shutter_time,
+            ctx.exposure_time,
             viewmat,
             ctx.fx,
             ctx.fy,
@@ -189,6 +227,7 @@ class _ProjectGaussians(Function):
             conics,
             v_xys,
             v_depths,
+            v_pix_vels,
             v_conics,
         )
 
@@ -237,10 +276,16 @@ class _ProjectGaussians(Function):
             None,
             # quats: Float[Tensor, "*batch 4"],
             v_quat,
+            # linear_velocity: Optional[Float[Tensor, "3"]],
+            None,
+            # angular_velocity: Optional[Float[Tensor, "3"]],
+            None,
+            # rolling_shutter_time: float,
+            None,
+            # exposure_time: float,
+            None,
             # viewmat: Float[Tensor, "4 4"],
             v_viewmat,
-            # projmat: Float[Tensor, "4 4"],
-            None,
             # fx: float,
             None,
             # fy: float,

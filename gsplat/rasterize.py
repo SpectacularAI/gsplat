@@ -14,6 +14,7 @@ from .utils import bin_and_sort_gaussians, compute_cumulative_intersects
 def rasterize_gaussians(
     xys: Float[Tensor, "*batch 2"],
     depths: Float[Tensor, "*batch 1"],
+    pix_vels: Float[Tensor, "*batch 2"],
     radii: Float[Tensor, "*batch 1"],
     conics: Float[Tensor, "*batch 3"],
     num_tiles_hit: Int[Tensor, "*batch 1"],
@@ -22,6 +23,7 @@ def rasterize_gaussians(
     img_height: int,
     img_width: int,
     block_width: int,
+    blur_samples: Optional[int] = 1,
     background: Optional[Float[Tensor, "channels"]] = None,
     return_alpha: Optional[bool] = False,
 ) -> Tensor:
@@ -33,6 +35,7 @@ def rasterize_gaussians(
     Args:
         xys (Tensor): xy coords of 2D gaussians.
         depths (Tensor): depths of 2D gaussians.
+        pix_vels (Tensor): pixel velocities of 2D gaussians.
         radii (Tensor): radii of 2D gaussians
         conics (Tensor): conics (inverse of covariance) of 2D gaussians in upper triangular format
         num_tiles_hit (Tensor): number of tiles hit per gaussian
@@ -73,6 +76,7 @@ def rasterize_gaussians(
     return _RasterizeGaussians.apply(
         xys.contiguous(),
         depths.contiguous(),
+        pix_vels.contiguous(),
         radii.contiguous(),
         conics.contiguous(),
         num_tiles_hit.contiguous(),
@@ -81,6 +85,7 @@ def rasterize_gaussians(
         img_height,
         img_width,
         block_width,
+        blur_samples,
         background.contiguous(),
         return_alpha,
     )
@@ -94,6 +99,7 @@ class _RasterizeGaussians(Function):
         ctx,
         xys: Float[Tensor, "*batch 2"],
         depths: Float[Tensor, "*batch 1"],
+        pix_vels: Float[Tensor, "*batch 2"],
         radii: Float[Tensor, "*batch 1"],
         conics: Float[Tensor, "*batch 3"],
         num_tiles_hit: Int[Tensor, "*batch 1"],
@@ -102,8 +108,9 @@ class _RasterizeGaussians(Function):
         img_height: int,
         img_width: int,
         block_width: int,
+        blur_samples: Optional[int] = 1,
         background: Optional[Float[Tensor, "channels"]] = None,
-        return_alpha: Optional[bool] = False,
+        return_alpha: Optional[bool] = False
     ) -> Tensor:
         num_points = xys.size(0)
         tile_bounds = (
@@ -123,8 +130,8 @@ class _RasterizeGaussians(Function):
             )
             gaussian_ids_sorted = torch.zeros(0, 1, device=xys.device)
             tile_bins = torch.zeros(0, 2, device=xys.device)
-            final_Ts = torch.zeros(img_height, img_width, device=xys.device)
-            final_idx = torch.zeros(img_height, img_width, device=xys.device)
+            final_Ts = torch.zeros(img_height, img_width, blur_samples, device=xys.device)
+            final_idx = torch.zeros(img_height, img_width, blur_samples, device=xys.device)
         else:
             (
                 isect_ids_unsorted,
@@ -151,9 +158,11 @@ class _RasterizeGaussians(Function):
                 tile_bounds,
                 block,
                 img_size,
+                blur_samples,
                 gaussian_ids_sorted,
                 tile_bins,
                 xys,
+                pix_vels,
                 conics,
                 colors,
                 opacity,
@@ -164,10 +173,12 @@ class _RasterizeGaussians(Function):
         ctx.img_height = img_height
         ctx.num_intersects = num_intersects
         ctx.block_width = block_width
+        ctx.blur_samples = blur_samples
         ctx.save_for_backward(
             gaussian_ids_sorted,
             tile_bins,
             xys,
+            pix_vels,
             conics,
             colors,
             opacity,
@@ -177,7 +188,7 @@ class _RasterizeGaussians(Function):
         )
 
         if return_alpha:
-            out_alpha = 1 - final_Ts
+            out_alpha = 1 - final_Ts.mean(dim=-1)
             return out_img, out_alpha
         else:
             return out_img
@@ -187,6 +198,7 @@ class _RasterizeGaussians(Function):
         img_height = ctx.img_height
         img_width = ctx.img_width
         num_intersects = ctx.num_intersects
+        blur_samples = ctx.blur_samples
 
         if v_out_alpha is None:
             v_out_alpha = torch.zeros_like(v_out_img[..., 0])
@@ -195,6 +207,7 @@ class _RasterizeGaussians(Function):
             gaussian_ids_sorted,
             tile_bins,
             xys,
+            pix_vels,
             conics,
             colors,
             opacity,
@@ -205,6 +218,7 @@ class _RasterizeGaussians(Function):
 
         if num_intersects < 1:
             v_xy = torch.zeros_like(xys)
+            v_pix_vels = torch.zeros_like(pix_vels)
             v_conic = torch.zeros_like(conics)
             v_colors = torch.zeros_like(colors)
             v_opacity = torch.zeros_like(opacity)
@@ -214,13 +228,15 @@ class _RasterizeGaussians(Function):
                 rasterize_fn = _C.rasterize_backward
             else:
                 rasterize_fn = _C.nd_rasterize_backward
-            v_xy, v_conic, v_colors, v_opacity = rasterize_fn(
+            v_xy, v_pix_vels, v_conic, v_colors, v_opacity = rasterize_fn(
                 img_height,
                 img_width,
                 ctx.block_width,
+                blur_samples,
                 gaussian_ids_sorted,
                 tile_bins,
                 xys,
+                pix_vels,
                 conics,
                 colors,
                 opacity,
@@ -234,6 +250,7 @@ class _RasterizeGaussians(Function):
         return (
             v_xy,  # xys
             None,  # depths
+            v_pix_vels, # pix vels
             None,  # radii
             v_conic,  # conics
             None,  # num_tiles_hit
@@ -242,6 +259,7 @@ class _RasterizeGaussians(Function):
             None,  # img_height
             None,  # img_width
             None,  # block_width
+            None,  # blur_samples
             None,  # background
             None,  # return_alpha
         )

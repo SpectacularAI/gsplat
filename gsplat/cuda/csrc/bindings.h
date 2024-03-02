@@ -44,6 +44,7 @@ std::tuple<
     torch::Tensor,
     torch::Tensor,
     torch::Tensor,
+    torch::Tensor,
     torch::Tensor>
 project_gaussians_forward_tensor(
     const int num_points,
@@ -51,6 +52,10 @@ project_gaussians_forward_tensor(
     torch::Tensor &scales,
     const float glob_scale,
     torch::Tensor &quats,
+    const std::tuple<float, float, float> linear_velocity,
+    const std::tuple<float, float, float> angular_velocity,
+    const float rolling_shutter_time,
+    const float exposure_time,
     torch::Tensor &viewmat,
     const float fx,
     const float fy,
@@ -74,6 +79,10 @@ project_gaussians_backward_tensor(
     torch::Tensor &scales,
     const float glob_scale,
     torch::Tensor &quats,
+    const std::tuple<float, float, float> linear_velocity,
+    const std::tuple<float, float, float> angular_velocity,
+    const float rolling_shutter_time,
+    const float exposure_time,
     torch::Tensor &viewmat,
     const float fx,
     const float fy,
@@ -86,6 +95,7 @@ project_gaussians_backward_tensor(
     torch::Tensor &conics,
     torch::Tensor &v_xy,
     torch::Tensor &v_depth,
+    torch::Tensor &v_pix_vel,
     torch::Tensor &v_conic
 );
 
@@ -115,9 +125,11 @@ std::tuple<
     const std::tuple<int, int, int> tile_bounds,
     const std::tuple<int, int, int> block,
     const std::tuple<int, int, int> img_size,
+    const unsigned n_blur_samples,
     const torch::Tensor &gaussian_ids_sorted,
     const torch::Tensor &tile_bins,
     const torch::Tensor &xys,
+    const torch::Tensor &pix_vels,
     const torch::Tensor &conics,
     const torch::Tensor &colors,
     const torch::Tensor &opacities,
@@ -132,9 +144,11 @@ std::tuple<
     const std::tuple<int, int, int> tile_bounds,
     const std::tuple<int, int, int> block,
     const std::tuple<int, int, int> img_size,
+    const unsigned n_blur_samples,
     const torch::Tensor &gaussian_ids_sorted,
     const torch::Tensor &tile_bins,
     const torch::Tensor &xys,
+    const torch::Tensor &pix_vels,
     const torch::Tensor &conics,
     const torch::Tensor &colors,
     const torch::Tensor &opacities,
@@ -145,6 +159,7 @@ std::tuple<
 std::
     tuple<
         torch::Tensor, // dL_dxy
+        torch::Tensor, // dL dpix_vels
         torch::Tensor, // dL_dconic
         torch::Tensor, // dL_dcolors
         torch::Tensor  // dL_dopacity
@@ -153,9 +168,11 @@ std::
         const unsigned img_height,
         const unsigned img_width,
         const unsigned block_width,
+        const unsigned n_blur_samples,
         const torch::Tensor &gaussians_ids_sorted,
         const torch::Tensor &tile_bins,
         const torch::Tensor &xys,
+        const torch::Tensor &pix_vels,
         const torch::Tensor &conics,
         const torch::Tensor &colors,
         const torch::Tensor &opacities,
@@ -169,6 +186,7 @@ std::
 std::
     tuple<
         torch::Tensor, // dL_dxy
+        torch::Tensor, // dL dpix_vels
         torch::Tensor, // dL_dconic
         torch::Tensor, // dL_dcolors
         torch::Tensor  // dL_dopacity
@@ -177,9 +195,11 @@ std::
         const unsigned img_height,
         const unsigned img_width,
         const unsigned block_width,
+        const unsigned n_blur_samples,
         const torch::Tensor &gaussians_ids_sorted,
         const torch::Tensor &tile_bins,
         const torch::Tensor &xys,
+        const torch::Tensor &pix_vels,
         const torch::Tensor &conics,
         const torch::Tensor &colors,
         const torch::Tensor &opacities,

@@ -212,13 +212,108 @@ scale_to_mat(const float3 scale, const float glob_scale) {
     return S;
 }
 
-// device helper for culling near points
-inline __device__ bool clip_near_plane(
-    const float3 p, const float *viewmat, float3 &p_view, float thresh
-) {
-    p_view = transform_4x3(viewmat, p);
-    if (p_view.z <= thresh) {
-        return true;
+#define MAX_ABS_REL_ROLL_TIME 0.5f
+#define MAX_BLUR_SAMPLES 10
+
+inline __device__ float compute_roll_time(
+  const float3 p_view,
+  const float fy,
+  const float img_size_y,
+  const float rolling_shutter_time) {
+
+    const float iz_reg = 1.0 / (p_view.z + 1e-6f);
+    const float const_coeff = fy / img_size_y;
+    float rel_roll_time = const_coeff * p_view.y * iz_reg;
+
+    if (rel_roll_time > MAX_ABS_REL_ROLL_TIME) {
+        rel_roll_time = (rel_roll_time > 0.0f ? 1 : -1) * MAX_ABS_REL_ROLL_TIME;
     }
-    return false;
+
+    // ignoring pp.y, assuming it's more or less img_size.y / 2.
+    // also ignoring the effect of the compensation in y on roll_t
+    return rolling_shutter_time * rel_roll_time;
+}
+
+inline __device__ float compute_and_sum_roll_time_vjp(
+    const float3 p_view,
+    const float fy,
+    const float img_size_y,
+    const float rolling_shutter_time,
+    const float v_roll_time,
+    float3 &v_p_view_accumulator)
+{
+    const float iz_reg = 1.0 / (p_view.z + 1e-6f);
+    const float const_coeff = fy / img_size_y;
+    float rel_roll_time = const_coeff * p_view.y * iz_reg;
+
+    if (abs(rel_roll_time) > MAX_ABS_REL_ROLL_TIME) {
+        rel_roll_time = (rel_roll_time > 0.0f ? 1 : -1) * MAX_ABS_REL_ROLL_TIME;
+    } else {
+        v_p_view_accumulator.y += rolling_shutter_time * const_coeff * iz_reg * v_roll_time;
+        v_p_view_accumulator.z -= rolling_shutter_time * rel_roll_time * iz_reg * v_roll_time;
+    }
+    return rolling_shutter_time * rel_roll_time;
+}
+
+inline __device__ float2 compute_pix_velocity(const float3 p_view, const float3 lin_vel, const float3 ang_vel, const float2 focal_lengths) {
+    glm::vec3 ang_vel_glm(ang_vel.x, ang_vel.y, ang_vel.z);
+    glm::vec3 lin_part(lin_vel.x, lin_vel.y, lin_vel.z);
+    glm::vec3 p_view_glm(p_view.x, p_view.y, p_view.z);
+
+    glm::vec3 rot_part = glm::cross(ang_vel_glm, p_view_glm);
+    float iz_reg = 1.0 / (p_view.z + 1e-6f);
+    glm::vec3 total_vel = lin_part + rot_part;
+    glm::vec3 total_vel_npc = total_vel * iz_reg;
+
+    // negative sign: move points to the opposite direction as the camera
+    float2 out = {
+        -total_vel_npc.x * focal_lengths.x,
+        -total_vel_npc.y * focal_lengths.y
+    };
+
+    return out;
+}
+
+inline __device__ void compute_and_sum_pix_velocity_vjp(
+    const float3 p_view,
+    const float3 lin_vel,
+    const float3 ang_vel,
+    const float2 focal_lengths,
+    const float2 v_pix_velocity,
+    float3 &v_p_view_accumulator)
+{
+    glm::vec3 ang_vel_glm(ang_vel.x, ang_vel.y, ang_vel.z);
+    glm::vec3 lin_part(lin_vel.x, lin_vel.y, lin_vel.z);
+    glm::vec3 p_view_glm(p_view.x, p_view.y, p_view.z);
+
+    glm::vec3 rot_part = glm::cross(ang_vel_glm, p_view_glm);
+    float iz_reg = 1.0 / (p_view.z + 1e-6f);
+    glm::vec3 total_vel = lin_part + rot_part;
+    // glm::vec3 total_vel_npc = total_vel * iz_reg;
+
+    // out = (-focal_lengths * total_vel_ncp)_xy
+
+    glm::vec3 v_total_vel_npc = {
+        -focal_lengths.x * v_pix_velocity.x,
+        -focal_lengths.y * v_pix_velocity.y,
+        0
+    };
+
+    float v_iz_reg = glm::dot(v_total_vel_npc, total_vel);
+    v_p_view_accumulator.z -= v_iz_reg / (iz_reg * iz_reg);
+
+    // v^T * cross(ang, p_view)
+
+    glm::vec3 v_rot_part = iz_reg * v_total_vel_npc;
+    //glm::vec3 v_lin_part = v_rot_part;
+
+    // (v_rot_part^T * cross_prod_matrix(ang_vel))^T
+    // = cross_prod_matrix(ang_vel)^T * v_rot_part // ... skew-symmetry
+    // = -cross_prod_matrix(ang_vel) * v_rot_part
+    // = -cross(ang_vel, v_rot_part)
+    glm::vec3 v_p_view_rot = -glm::cross(ang_vel_glm, v_rot_part);
+
+    v_p_view_accumulator.x += v_p_view_rot[0];
+    v_p_view_accumulator.y += v_p_view_rot[1];
+    v_p_view_accumulator.z += v_p_view_rot[2];
 }
