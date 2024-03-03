@@ -395,6 +395,8 @@ rasterize_forward_tensor(
     const torch::Tensor &tile_bins,
     const torch::Tensor &xys,
     const torch::Tensor &pix_vels,
+    const float rolling_shutter_time,
+    const float exposure_time,
     const torch::Tensor &conics,
     const torch::Tensor &colors,
     const torch::Tensor &opacities,
@@ -450,6 +452,8 @@ rasterize_forward_tensor(
         (int2 *)tile_bins.contiguous().data_ptr<int>(),
         (float2 *)xys.contiguous().data_ptr<float>(),
         (float2 *)pix_vels.contiguous().data_ptr<float>(),
+        rolling_shutter_time,
+        exposure_time,
         (float3 *)conics.contiguous().data_ptr<float>(),
         (float3 *)colors.contiguous().data_ptr<float>(),
         opacities.contiguous().data_ptr<float>(),
@@ -473,6 +477,8 @@ nd_rasterize_forward_tensor(
     const torch::Tensor &tile_bins,
     const torch::Tensor &xys,
     const torch::Tensor &pix_vels,
+    const float rolling_shutter_time,
+    const float exposure_time,
     const torch::Tensor &conics,
     const torch::Tensor &colors,
     const torch::Tensor &opacities,
@@ -487,7 +493,8 @@ nd_rasterize_forward_tensor(
     CHECK_INPUT(opacities);
     CHECK_INPUT(background);
     (void)pix_vels;
-    TORCH_CHECK(n_blur_samples == 1, "blur not supported here");
+    TORCH_CHECK(n_blur_samples == 1 && exposure_time == 0, "blur not supported here");
+    TORCH_CHECK(rolling_shutter_time == 0, "rolling shutter not supported here");
 
     dim3 tile_bounds_dim3;
     tile_bounds_dim3.x = std::get<0>(tile_bounds);
@@ -561,6 +568,8 @@ std::
         const torch::Tensor &tile_bins,
         const torch::Tensor &xys,
         const torch::Tensor &pix_vels,
+        const float rolling_shutter_time,
+        const float exposure_time,
         const torch::Tensor &conics,
         const torch::Tensor &colors,
         const torch::Tensor &opacities,
@@ -574,7 +583,8 @@ std::
     CHECK_INPUT(xys);
     CHECK_INPUT(colors);
     (void)pix_vels;
-    TORCH_CHECK(n_blur_samples == 1, "blur not supported here");
+    TORCH_CHECK(n_blur_samples == 1 && exposure_time == 0, "blur not supported here");
+    TORCH_CHECK(rolling_shutter_time == 0, "rolling shutter not supported here");
 
     if (xys.ndimension() != 2 || xys.size(1) != 2) {
         AT_ERROR("xys must have dimensions (num_points, 2)");
@@ -649,6 +659,8 @@ std::
         const torch::Tensor &tile_bins,
         const torch::Tensor &xys,
         const torch::Tensor &pix_vels,
+        const float rolling_shutter_time,
+        const float exposure_time,
         const torch::Tensor &conics,
         const torch::Tensor &colors,
         const torch::Tensor &opacities,
@@ -700,6 +712,8 @@ std::
         (int2 *)tile_bins.contiguous().data_ptr<int>(),
         (float2 *)xys.contiguous().data_ptr<float>(),
         (float2 *)pix_vels.contiguous().data_ptr<float>(),
+        rolling_shutter_time,
+        exposure_time,
         (float3 *)conics.contiguous().data_ptr<float>(),
         (float3 *)colors.contiguous().data_ptr<float>(),
         opacities.contiguous().data_ptr<float>(),

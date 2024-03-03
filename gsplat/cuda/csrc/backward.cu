@@ -147,6 +147,8 @@ __global__ void rasterize_backward_kernel(
     const int2* __restrict__ tile_bins,
     const float2* __restrict__ xys,
     const float2* __restrict__ pix_vels,
+    const float rolling_shutter_time,
+    const float exposure_time,
     const float3* __restrict__ conics,
     const float3* __restrict__ rgbs,
     const float* __restrict__ opacities,
@@ -184,10 +186,11 @@ __global__ void rasterize_backward_kernel(
     __shared__ float3 conic_batch[MAX_BLOCK_SIZE];
     __shared__ float3 rgbs_batch[MAX_BLOCK_SIZE];
 
+    float roll_time = rolling_shutter_time * (py / img_size.y - 0.5); // check sign
     const float blur_avg_factor = 1.0f / n_blur_samples;
     assert(n_blur_samples <= MAX_BLUR_SAMPLES);
     for (int32_t blur_i = 0; blur_i < MAX_BLUR_SAMPLES && blur_i < n_blur_samples; ++blur_i) {
-        float blur_rel = (n_blur_samples > 1) ? (float(blur_i) / (n_blur_samples - 1) - 0.5f) : 0.0f;
+        float blur_rel = ((n_blur_samples > 1) ? (float(blur_i) / (n_blur_samples - 1) - 0.5f) * exposure_time : 0.0f) + roll_time;
 
         const int32_t blur_sample_id = pix_id * n_blur_samples + blur_i;
 
@@ -380,28 +383,17 @@ __global__ void project_gaussians_backward_kernel(
     float2 focal_lengths = { fx, fy };
 
     float2 v_xy_moved = v_xy[idx];
-    float3 v_p_view_rolling_shutter = { 0, 0, 0 };
+    float3 v_p_view_pix_vel = { 0, 0, 0 };
     if (rolling_shutter_time > 0 || exposure_time > 0) {
-        float2 pix_velocity = compute_pix_velocity(p_view, lin_vel, ang_vel, focal_lengths); // TODO: optimize
-
-        float v_roll_time = pix_velocity.x * v_xy_moved.x + pix_velocity.y * v_xy_moved.y;
-        float roll_time = compute_and_sum_roll_time_vjp(p_view, fy, img_size.y, rolling_shutter_time, v_roll_time, v_p_view_rolling_shutter);
-
-        // float2 v_pix_velocity = v_pix_vel[idx];
-        float2 v_pix_velocity = { 0, 0 }; // ------------------------- TODO
-
-        // v_xy_moved = v_xy_orig + pix_velocity * roll_time;
-        v_pix_velocity.x += roll_time * v_xy_moved.x;
-        v_pix_velocity.y += roll_time * v_xy_moved.y;
-
-        compute_and_sum_pix_velocity_vjp(p_view, lin_vel, ang_vel, focal_lengths, v_pix_velocity, v_p_view_rolling_shutter);
+        float2 v_pix_velocity = v_pix_vel[idx];
+        compute_and_sum_pix_velocity_vjp(p_view, lin_vel, ang_vel, focal_lengths, v_pix_velocity, v_p_view_pix_vel);
     }
 
     float3 v_p_view = project_pix_vjp(focal_lengths, p_view, v_xy_moved);
-    v_p_view.x += v_p_view_rolling_shutter.x;
-    v_p_view.y += v_p_view_rolling_shutter.y;
+    v_p_view.x += v_p_view_pix_vel.x;
+    v_p_view.y += v_p_view_pix_vel.y;
     // get z gradient contribution to mean3d gradient
-    v_p_view.z += v_p_view_rolling_shutter.z + v_depth[idx];
+    v_p_view.z += v_p_view_pix_vel.z + v_depth[idx];
 
     // get v_mean3d from v_xy
     v_mean3d[idx] = transform_4x3_rot_only_transposed(

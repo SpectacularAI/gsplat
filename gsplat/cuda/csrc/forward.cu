@@ -86,15 +86,8 @@ __global__ void project_gaussians_forward_kernel(
 
     float2 pix_vel = { 0, 0 };
     if (rolling_shutter_time > 0 || exposure_time > 0) {
-        float roll_time = compute_roll_time(p_view, fy, img_size.y, rolling_shutter_time);
         pix_vel = compute_pix_velocity(p_view, lin_vel, ang_vel, focal_lengths);
-
-        center.x += pix_vel.x * roll_time;
-        center.y += pix_vel.y * roll_time;
-
-        pix_vel.x *= exposure_time;
-        pix_vel.y *= exposure_time;
-        radius += sqrt(pix_vel.x * pix_vel.x + pix_vel.y * pix_vel.y) * 0.5;
+        radius += sqrt(pix_vel.x * pix_vel.x + pix_vel.y * pix_vel.y) * 0.5 * (exposure_time + rolling_shutter_time);
     }
     pix_vels[idx] = pix_vel;
 
@@ -321,6 +314,8 @@ __global__ void rasterize_forward(
     const int2* __restrict__ tile_bins,
     const float2* __restrict__ xys,
     const float2* __restrict__ pix_vels,
+    const float rolling_shutter_time,
+    const float exposure_time,
     const float3* __restrict__ conics,
     const float3* __restrict__ colors,
     const float* __restrict__ opacities,
@@ -365,9 +360,10 @@ __global__ void rasterize_forward(
 
     assert(n_blur_samples <= MAX_BLUR_SAMPLES);
 
+    float roll_time = rolling_shutter_time * (py / img_size.y - 0.5); // check sign
     const float blur_avg_factor = 1.0f / n_blur_samples;
     for (int32_t blur_i = 0; blur_i < MAX_BLUR_SAMPLES && blur_i < n_blur_samples; ++blur_i) {
-        float blur_rel = (n_blur_samples > 1) ? (float(blur_i) / (n_blur_samples - 1) - 0.5f) : 0.0f;
+        float blur_rel = ((n_blur_samples > 1) ? (float(blur_i) / (n_blur_samples - 1) - 0.5f) * exposure_time : 0.0f) + roll_time;
         bool done = !inside;
 
         // current visibility left to render

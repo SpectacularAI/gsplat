@@ -23,6 +23,8 @@ def rasterize_gaussians(
     img_height: int,
     img_width: int,
     block_width: int,
+    rolling_shutter_time: Optional[float] = 0,
+    exposure_time: Optional[float] = 0,
     blur_samples: Optional[int] = 1,
     background: Optional[Float[Tensor, "channels"]] = None,
     return_alpha: Optional[bool] = False,
@@ -44,6 +46,9 @@ def rasterize_gaussians(
         img_height (int): height of the rendered image.
         img_width (int): width of the rendered image.
         block_width (int): MUST match whatever block width was used in the project_gaussians call. integer number of pixels between 2 and 16 inclusive
+        rolling_shutter_time (float) Rolling shutter readout time, seconds,
+        exposure_time (float) Exposure time, seconds,
+        blur_samples (int): Number of motion blur samples
         background (Tensor): background color
         return_alpha (bool): whether to return alpha channel
 
@@ -85,6 +90,8 @@ def rasterize_gaussians(
         img_height,
         img_width,
         block_width,
+        rolling_shutter_time,
+        exposure_time,
         blur_samples,
         background.contiguous(),
         return_alpha,
@@ -108,6 +115,8 @@ class _RasterizeGaussians(Function):
         img_height: int,
         img_width: int,
         block_width: int,
+        rolling_shutter_time: Optional[float] = 0,
+        exposure_time: Optional[float] = 0,
         blur_samples: Optional[int] = 1,
         background: Optional[Float[Tensor, "channels"]] = None,
         return_alpha: Optional[bool] = False
@@ -163,6 +172,8 @@ class _RasterizeGaussians(Function):
                 tile_bins,
                 xys,
                 pix_vels,
+                rolling_shutter_time,
+                exposure_time,
                 conics,
                 colors,
                 opacity,
@@ -174,6 +185,8 @@ class _RasterizeGaussians(Function):
         ctx.num_intersects = num_intersects
         ctx.block_width = block_width
         ctx.blur_samples = blur_samples
+        ctx.rolling_shutter_time = rolling_shutter_time
+        ctx.exposure_time = exposure_time
         ctx.save_for_backward(
             gaussian_ids_sorted,
             tile_bins,
@@ -237,6 +250,8 @@ class _RasterizeGaussians(Function):
                 tile_bins,
                 xys,
                 pix_vels,
+                ctx.rolling_shutter_time,
+                ctx.exposure_time,
                 conics,
                 colors,
                 opacity,
@@ -259,6 +274,8 @@ class _RasterizeGaussians(Function):
             None,  # img_height
             None,  # img_width
             None,  # block_width
+            None, # rolling shutter time
+            None, # exposure time
             None,  # blur_samples
             None,  # background
             None,  # return_alpha

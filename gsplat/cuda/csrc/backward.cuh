@@ -63,6 +63,8 @@ __global__ void rasterize_backward_kernel(
     const int2* __restrict__ tile_bins,
     const float2* __restrict__ xys,
     const float2* __restrict__ pix_vels,
+    const float rolling_shutter_time,
+    const float exposure_time,
     const float3* __restrict__ conics,
     const float3* __restrict__ rgbs,
     const float* __restrict__ opacities,

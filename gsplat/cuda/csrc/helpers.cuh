@@ -212,48 +212,7 @@ scale_to_mat(const float3 scale, const float glob_scale) {
     return S;
 }
 
-#define MAX_ABS_REL_ROLL_TIME 0.5f
 #define MAX_BLUR_SAMPLES 10
-
-inline __device__ float compute_roll_time(
-  const float3 p_view,
-  const float fy,
-  const float img_size_y,
-  const float rolling_shutter_time) {
-
-    const float iz_reg = 1.0 / (p_view.z + 1e-6f);
-    const float const_coeff = fy / img_size_y;
-    float rel_roll_time = const_coeff * p_view.y * iz_reg;
-
-    if (rel_roll_time > MAX_ABS_REL_ROLL_TIME) {
-        rel_roll_time = (rel_roll_time > 0.0f ? 1 : -1) * MAX_ABS_REL_ROLL_TIME;
-    }
-
-    // ignoring pp.y, assuming it's more or less img_size.y / 2.
-    // also ignoring the effect of the compensation in y on roll_t
-    return rolling_shutter_time * rel_roll_time;
-}
-
-inline __device__ float compute_and_sum_roll_time_vjp(
-    const float3 p_view,
-    const float fy,
-    const float img_size_y,
-    const float rolling_shutter_time,
-    const float v_roll_time,
-    float3 &v_p_view_accumulator)
-{
-    const float iz_reg = 1.0 / (p_view.z + 1e-6f);
-    const float const_coeff = fy / img_size_y;
-    float rel_roll_time = const_coeff * p_view.y * iz_reg;
-
-    if (abs(rel_roll_time) > MAX_ABS_REL_ROLL_TIME) {
-        rel_roll_time = (rel_roll_time > 0.0f ? 1 : -1) * MAX_ABS_REL_ROLL_TIME;
-    } else {
-        v_p_view_accumulator.y += rolling_shutter_time * const_coeff * iz_reg * v_roll_time;
-        v_p_view_accumulator.z -= rolling_shutter_time * rel_roll_time * iz_reg * v_roll_time;
-    }
-    return rolling_shutter_time * rel_roll_time;
-}
 
 inline __device__ float2 compute_pix_velocity(const float3 p_view, const float3 lin_vel, const float3 ang_vel, const float2 focal_lengths) {
     glm::vec3 ang_vel_glm(ang_vel.x, ang_vel.y, ang_vel.z);
