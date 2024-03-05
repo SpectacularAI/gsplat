@@ -179,6 +179,7 @@ class _ProjectGaussians(Function):
             cov3d,
             radii,
             conics,
+            compensation,
         )
 
         return (xys, depths, pix_vels, radii, conics, compensation, num_tiles_hit, cov3d)
@@ -203,6 +204,7 @@ class _ProjectGaussians(Function):
             cov3d,
             radii,
             conics,
+            compensation,
         ) = ctx.saved_tensors
 
         (v_cov2d, v_cov3d, v_mean3d, v_scale, v_quat) = _C.project_gaussians_backward(
@@ -225,10 +227,12 @@ class _ProjectGaussians(Function):
             cov3d,
             radii,
             conics,
+            compensation,
             v_xys,
             v_depths,
             v_pix_vels,
             v_conics,
+            v_compensation,
         )
 
         if viewmat.requires_grad:
