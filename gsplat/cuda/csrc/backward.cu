@@ -115,7 +115,7 @@ __global__ void nd_rasterize_backward_kernel(
             v_alpha += T_final * ra * v_out_alpha;
             const float v_sigma = -opac * vis * v_alpha;
             v_conic_local = {0.5f * v_sigma * delta.x * delta.x, 
-                             0.5f * v_sigma * delta.x * delta.y, 
+                             v_sigma * delta.x * delta.y,
                              0.5f * v_sigma * delta.y * delta.y};
             v_xy_local = {v_sigma * (conic.x * delta.x + conic.y * delta.y), 
                           v_sigma * (conic.y * delta.x + conic.z * delta.y)};
@@ -313,7 +313,7 @@ __global__ void rasterize_backward_kernel(
 
                     const float v_sigma = -opac * vis * v_alpha;
                     v_conic_local.x += 0.5f * v_sigma * delta.x * delta.x;
-                    v_conic_local.y += 0.5f * v_sigma * delta.x * delta.y;
+                    v_conic_local.y += v_sigma * delta.x * delta.y;
                     v_conic_local.z += 0.5f * v_sigma * delta.y * delta.y;
 
                     float2 v_xy_cur = {
