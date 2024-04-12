@@ -219,13 +219,106 @@ scale_to_mat(const float3 scale, const float glob_scale) {
     return S;
 }
 
-// device helper for culling near points
-inline __device__ bool clip_near_plane(
-    const float3 p, const float *viewmat, float3 &p_view, float thresh
-) {
-    p_view = transform_4x3(viewmat, p);
-    if (p_view.z <= thresh) {
-        return true;
-    }
-    return false;
+inline __device__ float2 compute_pix_velocity(const float3 p_view, const float3 lin_vel, const float3 ang_vel, const float2 focal_lengths) {
+    glm::vec3 ang_vel_glm(ang_vel.x, ang_vel.y, ang_vel.z);
+    glm::vec3 lin_part(lin_vel.x, lin_vel.y, lin_vel.z);
+    glm::vec3 p_view_glm(p_view.x, p_view.y, p_view.z);
+
+    glm::vec3 rot_part = glm::cross(ang_vel_glm, p_view_glm);
+    glm::vec3 total_vel = lin_part + rot_part;
+
+    float rz = 1.f / p_view.z;
+    float rz2 = rz * rz;
+
+    float fx = focal_lengths.x;
+    float fy = focal_lengths.y;
+
+    // column major
+    // note: GLM/GLSL uses an opposite (wrong) notation for matrix dimensions
+    // 3x2 means 3 columns, 2 rows (i.e., a 2x3 matrix)
+    glm::mat3x2 J = glm::mat3x2(
+        fx * rz,
+        0.f,
+        0.f,
+        fy * rz,
+        -fx * p_view.x * rz2,
+        -fy * p_view.y * rz2
+    );
+
+    // negative sign: move points to the opposite direction as the camera
+    glm::vec2 total_vel_pix = -J * total_vel;
+    return { total_vel_pix.x, total_vel_pix.y };
+}
+
+inline __device__ void compute_and_sum_pix_velocity_vjp(
+    const float3 p_view,
+    const float3 lin_vel,
+    const float3 ang_vel,
+    const float2 focal_lengths,
+    const float2 v_pix_velocity,
+    float3 &v_p_view_accumulator)
+{
+    glm::vec3 ang_vel_glm(ang_vel.x, ang_vel.y, ang_vel.z);
+    glm::vec3 lin_part(lin_vel.x, lin_vel.y, lin_vel.z);
+    glm::vec3 p_view_glm(p_view.x, p_view.y, p_view.z);
+    glm::vec2 v_pix_velocity_glm(v_pix_velocity.x, v_pix_velocity.y);
+
+    glm::vec3 rot_part = glm::cross(ang_vel_glm, p_view_glm);
+    glm::vec3 total_vel = lin_part + rot_part;
+
+    float fx = focal_lengths.x;
+    float fy = focal_lengths.y;
+
+    float rz = 1.f / p_view.z;
+    float rz2 = rz * rz;
+
+    // column major. Note: these are 2x3 matrices (2 rows, 3 columns)
+    glm::mat3x2 J = glm::mat3x2(
+        fx * rz,
+        0.f,
+        0.f,
+        fy * rz,
+        -fx * p_view.x * rz2,
+        -fy * p_view.y * rz2
+    );
+    glm::mat3x2 dJ_dx = glm::mat3x2(
+        0.f,
+        0.f,
+        0.f,
+        0.f,
+        -fx * rz2,
+        0.f
+    );
+    glm::mat3x2 dJ_dy = glm::mat3x2(
+        0.f,
+        0.f,
+        0.f,
+        0.f,
+        0.f,
+        -fy * rz2
+    );
+    glm::mat3x2 dJ_dz = glm::mat3x2(
+        -fx * rz2,
+        0.f,
+        0.f,
+        -fy * rz2,
+        2.f * fx * p_view.x * rz2 * rz,
+        2.f * fy * p_view.y * rz2 * rz
+    );
+
+    v_p_view_accumulator.x -= glm::dot(v_pix_velocity_glm, dJ_dx * total_vel);
+    v_p_view_accumulator.y -= glm::dot(v_pix_velocity_glm, dJ_dy * total_vel);
+    v_p_view_accumulator.z -= glm::dot(v_pix_velocity_glm, dJ_dz * total_vel);
+
+    glm::vec3 v_rot_part = -glm::transpose(J) * v_pix_velocity_glm; // = v_total_vel
+
+    // (v_rot_part^T * cross_prod_matrix(ang_vel))^T
+    // = cross_prod_matrix(ang_vel)^T * v_rot_part // ... skew-symmetry
+    // = -cross_prod_matrix(ang_vel) * v_rot_part
+    // = -cross(ang_vel, v_rot_part)
+    glm::vec3 v_p_view_rot = -glm::cross(ang_vel_glm, v_rot_part);
+
+    v_p_view_accumulator.x += v_p_view_rot[0];
+    v_p_view_accumulator.y += v_p_view_rot[1];
+    v_p_view_accumulator.z += v_p_view_rot[2];
 }
