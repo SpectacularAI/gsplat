@@ -27,6 +27,8 @@ def rasterize_gaussians(
     background: Optional[Float[Tensor, "channels"]] = None,
     return_alpha: Optional[bool] = False,
     rolling_shutter_time: Optional[float] = 0,
+    exposure_time: Optional[float] = 0,
+    blur_samples: Optional[int] = 1,
 ) -> Tensor:
     """Rasterizes 2D gaussians by sorting and binning gaussian intersections for each tile and returns an N-dimensional output using alpha-compositing.
 
@@ -48,6 +50,8 @@ def rasterize_gaussians(
         background (Tensor): background color
         return_alpha (bool): whether to return alpha channel
         rolling_shutter_time (float) Rolling shutter readout time, seconds
+        exposure_time (float) Exposure time, seconds,
+        blur_samples (int): Number of motion blur samples
 
     Returns:
         A Tensor:
@@ -90,6 +94,8 @@ def rasterize_gaussians(
         background.contiguous(),
         return_alpha,
         rolling_shutter_time,
+        exposure_time,
+        blur_samples,
     )
 
 
@@ -113,6 +119,8 @@ class _RasterizeGaussians(Function):
         background: Float[Tensor, "channels"],
         return_alpha: Optional[bool] = False,
         rolling_shutter_time: Optional[float] = 0,
+        exposure_time: Optional[float] = 0,
+        blur_samples: Optional[int] = 1,
     ) -> Tensor:
         num_points = xys.size(0)
         tile_bounds = (
@@ -132,8 +140,8 @@ class _RasterizeGaussians(Function):
             )
             gaussian_ids_sorted = torch.zeros(0, 1, device=xys.device)
             tile_bins = torch.zeros(0, 2, device=xys.device)
-            final_Ts = torch.zeros(img_height, img_width, device=xys.device)
-            final_idx = torch.zeros(img_height, img_width, device=xys.device)
+            final_Ts = torch.zeros(img_height, img_width, blur_samples, device=xys.device)
+            final_idx = torch.zeros(img_height, img_width, blur_samples, device=xys.device)
         else:
             (
                 isect_ids_unsorted,
@@ -160,11 +168,13 @@ class _RasterizeGaussians(Function):
                 tile_bounds,
                 block,
                 img_size,
+                blur_samples,
                 gaussian_ids_sorted,
                 tile_bins,
                 xys,
                 pix_vels,
                 rolling_shutter_time,
+                exposure_time,
                 conics,
                 colors,
                 opacity,
@@ -175,7 +185,9 @@ class _RasterizeGaussians(Function):
         ctx.img_height = img_height
         ctx.num_intersects = num_intersects
         ctx.block_width = block_width
+        ctx.blur_samples = blur_samples
         ctx.rolling_shutter_time = rolling_shutter_time
+        ctx.exposure_time = exposure_time
         ctx.save_for_backward(
             gaussian_ids_sorted,
             tile_bins,
@@ -190,7 +202,7 @@ class _RasterizeGaussians(Function):
         )
 
         if return_alpha:
-            out_alpha = 1 - final_Ts
+            out_alpha = 1 - final_Ts.mean(dim=-1)
             return out_img, out_alpha
         else:
             return out_img
@@ -200,6 +212,7 @@ class _RasterizeGaussians(Function):
         img_height = ctx.img_height
         img_width = ctx.img_width
         num_intersects = ctx.num_intersects
+        blur_samples = ctx.blur_samples
 
         if v_out_alpha is None:
             v_out_alpha = torch.zeros_like(v_out_img[..., 0])
@@ -234,11 +247,13 @@ class _RasterizeGaussians(Function):
                 img_height,
                 img_width,
                 ctx.block_width,
+                blur_samples,
                 gaussian_ids_sorted,
                 tile_bins,
                 xys,
                 pix_vels,
                 ctx.rolling_shutter_time,
+                ctx.exposure_time,
                 conics,
                 colors,
                 opacity,
@@ -251,7 +266,7 @@ class _RasterizeGaussians(Function):
         v_background = None
         if background.requires_grad:
             v_background = torch.matmul(
-                v_out_img.float().view(-1, 3).t(), final_Ts.float().view(-1, 1)
+                v_out_img.float().view(-1, 3).t(), final_Ts.mean(dim=-1).float().view(-1, 1)
             ).squeeze()
 
         # Abs grad for gaussian splitting criterion. See
@@ -274,4 +289,6 @@ class _RasterizeGaussians(Function):
             v_background,  # background
             None,  # return_alpha
             None, # rolling shutter time
+            None, # exposure time
+            None,  # blur_samples
         )

@@ -169,6 +169,7 @@ project_gaussians_forward_tensor(
     const std::tuple<float, float, float> linear_velocity,
     const std::tuple<float, float, float> angular_velocity,
     const float rolling_shutter_time,
+    const float exposure_time,
     torch::Tensor &viewmat,
     const float fx,
     const float fy,
@@ -232,6 +233,7 @@ project_gaussians_forward_tensor(
         linear_velocity_float3,
         angular_velocity_float3,
         rolling_shutter_time,
+        exposure_time,
         viewmat.contiguous().data_ptr<float>(),
         intrins,
         img_size_dim3,
@@ -269,6 +271,7 @@ project_gaussians_backward_tensor(
     const std::tuple<float, float, float> linear_velocity,
     const std::tuple<float, float, float> angular_velocity,
     const float rolling_shutter_time,
+    const float exposure_time,
     torch::Tensor &viewmat,
     const float fx,
     const float fy,
@@ -330,6 +333,7 @@ project_gaussians_backward_tensor(
         linear_velocity_float3,
         angular_velocity_float3,
         rolling_shutter_time,
+        exposure_time,
         viewmat.contiguous().data_ptr<float>(),
         intrins,
         img_size_dim3,
@@ -422,11 +426,13 @@ rasterize_forward_tensor(
     const std::tuple<int, int, int> tile_bounds,
     const std::tuple<int, int, int> block,
     const std::tuple<int, int, int> img_size,
+    const unsigned n_blur_samples,
     const torch::Tensor &gaussian_ids_sorted,
     const torch::Tensor &tile_bins,
     const torch::Tensor &xys,
     const torch::Tensor &pix_vels,
     const float rolling_shutter_time,
+    const float exposure_time,
     const torch::Tensor &conics,
     const torch::Tensor &colors,
     const torch::Tensor &opacities,
@@ -441,6 +447,9 @@ rasterize_forward_tensor(
     CHECK_INPUT(colors);
     CHECK_INPUT(opacities);
     CHECK_INPUT(background);
+    TORCH_CHECK(
+        n_blur_samples > 0 && n_blur_samples <= MAX_BLUR_SAMPLES,
+        "unsupported blur size");
 
     dim3 tile_bounds_dim3;
     tile_bounds_dim3.x = std::get<0>(tile_bounds);
@@ -465,20 +474,22 @@ rasterize_forward_tensor(
         {img_height, img_width, channels}, xys.options().dtype(torch::kFloat32)
     );
     torch::Tensor final_Ts = torch::zeros(
-        {img_height, img_width}, xys.options().dtype(torch::kFloat32)
+        {img_height, img_width, n_blur_samples}, xys.options().dtype(torch::kFloat32)
     );
     torch::Tensor final_idx = torch::zeros(
-        {img_height, img_width}, xys.options().dtype(torch::kInt32)
+        {img_height, img_width, n_blur_samples}, xys.options().dtype(torch::kInt32)
     );
 
     rasterize_forward<<<tile_bounds_dim3, block_dim3>>>(
         tile_bounds_dim3,
         img_size_dim3,
+        n_blur_samples,
         gaussian_ids_sorted.contiguous().data_ptr<int32_t>(),
         (int2 *)tile_bins.contiguous().data_ptr<int>(),
         (float2 *)xys.contiguous().data_ptr<float>(),
         (float2 *)pix_vels.contiguous().data_ptr<float>(),
         rolling_shutter_time,
+        exposure_time,
         (float3 *)conics.contiguous().data_ptr<float>(),
         (float3 *)colors.contiguous().data_ptr<float>(),
         opacities.contiguous().data_ptr<float>(),
@@ -497,11 +508,13 @@ nd_rasterize_forward_tensor(
     const std::tuple<int, int, int> tile_bounds,
     const std::tuple<int, int, int> block,
     const std::tuple<int, int, int> img_size,
+    const unsigned n_blur_samples,
     const torch::Tensor &gaussian_ids_sorted,
     const torch::Tensor &tile_bins,
     const torch::Tensor &xys,
     const torch::Tensor &pix_vels,
     const float rolling_shutter_time,
+    const float exposure_time,
     const torch::Tensor &conics,
     const torch::Tensor &colors,
     const torch::Tensor &opacities,
@@ -516,6 +529,7 @@ nd_rasterize_forward_tensor(
     CHECK_INPUT(opacities);
     CHECK_INPUT(background);
     (void)pix_vels;
+    TORCH_CHECK(n_blur_samples == 1 && exposure_time == 0, "blur not supported here");
     TORCH_CHECK(rolling_shutter_time == 0, "rolling shutter not supported here");
 
     dim3 tile_bounds_dim3;
@@ -586,11 +600,13 @@ std::
         const unsigned img_height,
         const unsigned img_width,
         const unsigned block_width,
+        const unsigned n_blur_samples,
         const torch::Tensor &gaussians_ids_sorted,
         const torch::Tensor &tile_bins,
         const torch::Tensor &xys,
         const torch::Tensor &pix_vels,
         const float rolling_shutter_time,
+        const float exposure_time,
         const torch::Tensor &conics,
         const torch::Tensor &colors,
         const torch::Tensor &opacities,
@@ -604,6 +620,7 @@ std::
     CHECK_INPUT(xys);
     CHECK_INPUT(colors);
     (void)pix_vels;
+    TORCH_CHECK(n_blur_samples == 1 && exposure_time == 0, "blur not supported here");
     TORCH_CHECK(rolling_shutter_time == 0, "rolling shutter not supported here");
 
     if (xys.ndimension() != 2 || xys.size(1) != 2) {
@@ -677,11 +694,13 @@ std::
         const unsigned img_height,
         const unsigned img_width,
         const unsigned block_width,
+        const unsigned n_blur_samples,
         const torch::Tensor &gaussians_ids_sorted,
         const torch::Tensor &tile_bins,
         const torch::Tensor &xys,
         const torch::Tensor &pix_vels,
         const float rolling_shutter_time,
+        const float exposure_time,
         const torch::Tensor &conics,
         const torch::Tensor &colors,
         const torch::Tensor &opacities,
@@ -694,6 +713,9 @@ std::
     DEVICE_GUARD(xys);
     CHECK_INPUT(xys);
     CHECK_INPUT(colors);
+    TORCH_CHECK(
+        n_blur_samples > 0 && n_blur_samples <= MAX_BLUR_SAMPLES,
+        "unsupported blur size");
 
     if (xys.ndimension() != 2 || xys.size(1) != 2) {
         AT_ERROR("xys must have dimensions (num_points, 2)");
@@ -724,11 +746,13 @@ std::
     rasterize_backward_kernel<<<tile_bounds, block>>>(
         tile_bounds,
         img_size,
+        n_blur_samples,
         gaussians_ids_sorted.contiguous().data_ptr<int>(),
         (int2 *)tile_bins.contiguous().data_ptr<int>(),
         (float2 *)xys.contiguous().data_ptr<float>(),
         (float2 *)pix_vels.contiguous().data_ptr<float>(),
         rolling_shutter_time,
+        exposure_time,
         (float3 *)conics.contiguous().data_ptr<float>(),
         (float3 *)colors.contiguous().data_ptr<float>(),
         opacities.contiguous().data_ptr<float>(),
