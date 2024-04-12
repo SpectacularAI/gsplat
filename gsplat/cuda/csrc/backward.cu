@@ -26,6 +26,7 @@ __global__ void nd_rasterize_backward_kernel(
     const int32_t* __restrict__ gaussians_ids_sorted,
     const int2* __restrict__ tile_bins,
     const float2* __restrict__ xys,
+    const float2* __restrict__ pix_vels,
     const float3* __restrict__ conics,
     const float* __restrict__ rgbs,
     const float* __restrict__ opacities,
@@ -145,6 +146,8 @@ __global__ void rasterize_backward_kernel(
     const int32_t* __restrict__ gaussian_ids_sorted,
     const int2* __restrict__ tile_bins,
     const float2* __restrict__ xys,
+    const float2* __restrict__ pix_vels,
+    const float rolling_shutter_time,
     const float3* __restrict__ conics,
     const float3* __restrict__ rgbs,
     const float* __restrict__ opacities,
@@ -155,6 +158,7 @@ __global__ void rasterize_backward_kernel(
     const float* __restrict__ v_output_alpha,
     float2* __restrict__ v_xy,
     float2* __restrict__ v_xy_abs,
+    float2* __restrict__ v_pix_vels,
     float3* __restrict__ v_conic,
     float3* __restrict__ v_rgb,
     float* __restrict__ v_opacity
@@ -175,6 +179,8 @@ __global__ void rasterize_backward_kernel(
     // keep not rasterizing threads around for reading data
     const bool inside = (i < img_size.y && j < img_size.x);
 
+    float roll_time = rolling_shutter_time * (py / img_size.y - 0.5);
+
     // this is the T AFTER the last gaussian in this pixel
     float T_final = final_Ts[pix_id];
     float T = T_final;
@@ -192,6 +198,7 @@ __global__ void rasterize_backward_kernel(
 
     __shared__ int32_t id_batch[MAX_BLOCK_SIZE];
     __shared__ float3 xy_opacity_batch[MAX_BLOCK_SIZE];
+    __shared__ float2 pix_vel_batch[MAX_BLOCK_SIZE];
     __shared__ float3 conic_batch[MAX_BLOCK_SIZE];
     __shared__ float3 rgbs_batch[MAX_BLOCK_SIZE];
 
@@ -220,7 +227,9 @@ __global__ void rasterize_backward_kernel(
             id_batch[tr] = g_id;
             const float2 xy = xys[g_id];
             const float opac = opacities[g_id];
+            const float2 pix_vel = pix_vels[g_id];
             xy_opacity_batch[tr] = {xy.x, xy.y, opac};
+            pix_vel_batch[tr] = { pix_vel.x, pix_vel.y };
             conic_batch[tr] = conics[g_id];
             rgbs_batch[tr] = rgbs[g_id];
         }
@@ -241,8 +250,13 @@ __global__ void rasterize_backward_kernel(
             if(valid){
                 conic = conic_batch[t];
                 float3 xy_opac = xy_opacity_batch[t];
+                const float2 pix_vel = pix_vel_batch[t];
+
                 opac = xy_opac.z;
-                delta = {xy_opac.x - px, xy_opac.y - py};
+                delta = {
+                    xy_opac.x + roll_time * pix_vel.x - px,
+                    xy_opac.y + roll_time * pix_vel.y - py
+                };
                 float sigma = 0.5f * (conic.x * delta.x * delta.x +
                                             conic.z * delta.y * delta.y) +
                                     conic.y * delta.x * delta.y;
@@ -258,6 +272,7 @@ __global__ void rasterize_backward_kernel(
             }
             float3 v_rgb_local = {0.f, 0.f, 0.f};
             float3 v_conic_local = {0.f, 0.f, 0.f};
+            float2 v_pix_vel_local = {0.f, 0.f};
             float2 v_xy_local = {0.f, 0.f};
             float2 v_xy_abs_local = {0.f, 0.f};
             float v_opacity_local = 0.f;
@@ -291,13 +306,19 @@ __global__ void rasterize_backward_kernel(
                 v_conic_local = {0.5f * v_sigma * delta.x * delta.x, 
                                  v_sigma * delta.x * delta.y,
                                  0.5f * v_sigma * delta.y * delta.y};
+
                 v_xy_local = {v_sigma * (conic.x * delta.x + conic.y * delta.y), 
                                     v_sigma * (conic.y * delta.x + conic.z * delta.y)};
                 v_xy_abs_local = {abs(v_xy_local.x), abs(v_xy_local.y)};
+                v_pix_vel_local = {
+                    v_xy_local.x * roll_time,
+                    v_xy_local.y * roll_time
+                };
                 v_opacity_local = vis * v_alpha;
             }
             warpSum3(v_rgb_local, warp);
             warpSum3(v_conic_local, warp);
+            warpSum2(v_pix_vel_local, warp);
             warpSum2(v_xy_local, warp);
             warpSum2(v_xy_abs_local, warp);
             warpSum(v_opacity_local, warp);
@@ -312,6 +333,10 @@ __global__ void rasterize_backward_kernel(
                 atomicAdd(v_conic_ptr + 3*g + 0, v_conic_local.x);
                 atomicAdd(v_conic_ptr + 3*g + 1, v_conic_local.y);
                 atomicAdd(v_conic_ptr + 3*g + 2, v_conic_local.z);
+
+                float* v_pix_vel_ptr = (float*)(v_pix_vels);
+                atomicAdd(v_pix_vel_ptr + 2*g + 0, v_pix_vel_local.x);
+                atomicAdd(v_pix_vel_ptr + 2*g + 1, v_pix_vel_local.y);
                 
                 float* v_xy_ptr = (float*)(v_xy);
                 atomicAdd(v_xy_ptr + 2*g + 0, v_xy_local.x);
@@ -333,6 +358,9 @@ __global__ void project_gaussians_backward_kernel(
     const float3* __restrict__ scales,
     const float glob_scale,
     const float4* __restrict__ quats,
+    const float3 lin_vel,
+    const float3 ang_vel,
+    const float rolling_shutter_time,
     const float* __restrict__ viewmat,
     const float4 intrins,
     const dim3 img_size,
@@ -342,6 +370,7 @@ __global__ void project_gaussians_backward_kernel(
     const float* __restrict__ compensation,
     const float2* __restrict__ v_xy,
     const float* __restrict__ v_depth,
+    const float2* __restrict__ v_pix_vel,
     const float3* __restrict__ v_conic,
     const float* __restrict__ v_compensation,
     float3* __restrict__ v_cov2d,
@@ -355,21 +384,29 @@ __global__ void project_gaussians_backward_kernel(
         return;
     }
     float3 p_world = means3d[idx];
+    float3 p_view = transform_4x3(viewmat, p_world);
+
     float fx = intrins.x;
     float fy = intrins.y;
-    float3 p_view = transform_4x3(viewmat, p_world);
+    float2 focal_lengths = { fx, fy };
+
+    float2 v_xy_moved = v_xy[idx];
+    float3 v_p_view_pix_vel = { 0, 0, 0 };
+    if (rolling_shutter_time > 0) {
+        float2 v_pix_velocity = v_pix_vel[idx];
+        compute_and_sum_pix_velocity_vjp(p_view, lin_vel, ang_vel, focal_lengths, v_pix_velocity, v_p_view_pix_vel);
+    }
+
+    float3 v_p_view = project_pix_vjp(focal_lengths, p_view, v_xy_moved);
+    v_p_view.x += v_p_view_pix_vel.x;
+    v_p_view.y += v_p_view_pix_vel.y;
+    // get z gradient contribution to mean3d gradient
+    v_p_view.z += v_p_view_pix_vel.z + v_depth[idx];
+
     // get v_mean3d from v_xy
     v_mean3d[idx] = transform_4x3_rot_only_transposed(
         viewmat,
-        project_pix_vjp({fx, fy}, p_view, v_xy[idx]));
-
-    // get z gradient contribution to mean3d gradient
-    // z = viemwat[8] * mean3d.x + viewmat[9] * mean3d.y + viewmat[10] *
-    // mean3d.z + viewmat[11]
-    float v_z = v_depth[idx];
-    v_mean3d[idx].x += viewmat[8] * v_z;
-    v_mean3d[idx].y += viewmat[9] * v_z;
-    v_mean3d[idx].z += viewmat[10] * v_z;
+        v_p_view);
 
     // get v_cov2d
     cov2d_to_conic_vjp(conics[idx], v_conic[idx], v_cov2d[idx]);

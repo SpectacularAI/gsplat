@@ -24,6 +24,10 @@ def test_get_tile_bin_edges():
     H, W = 512, 512
     clip_thresh = 0.01
 
+    linear_velocity = torch.randn(3, device=device)
+    angular_velocity = torch.randn(3, device=device)
+    rolling_shutter_time = 0.1
+
     BLOCK_SIZE = 16
     tile_bounds = (
         (W + BLOCK_SIZE - 1) // BLOCK_SIZE,
@@ -36,6 +40,7 @@ def test_get_tile_bin_edges():
         _cov2d,
         _xys,
         _depths,
+        _pix_vels,
         _radii,
         _conics,
         _compensation,
@@ -46,6 +51,9 @@ def test_get_tile_bin_edges():
         scales,
         glob_scale,
         quats,
+        linear_velocity,
+        angular_velocity,
+        rolling_shutter_time,
         viewmat,
         (fx, fy, W / 2, H / 2),
         (H, W),

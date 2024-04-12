@@ -15,6 +15,7 @@ from .utils import bin_and_sort_gaussians, compute_cumulative_intersects
 def rasterize_gaussians(
     xys: Float[Tensor, "*batch 2"],
     depths: Float[Tensor, "*batch 1"],
+    pix_vels: Float[Tensor, "*batch 2"],
     radii: Float[Tensor, "*batch 1"],
     conics: Float[Tensor, "*batch 3"],
     num_tiles_hit: Int[Tensor, "*batch 1"],
@@ -25,6 +26,7 @@ def rasterize_gaussians(
     block_width: int,
     background: Optional[Float[Tensor, "channels"]] = None,
     return_alpha: Optional[bool] = False,
+    rolling_shutter_time: Optional[float] = 0,
 ) -> Tensor:
     """Rasterizes 2D gaussians by sorting and binning gaussian intersections for each tile and returns an N-dimensional output using alpha-compositing.
 
@@ -34,6 +36,7 @@ def rasterize_gaussians(
     Args:
         xys (Tensor): xy coords of 2D gaussians.
         depths (Tensor): depths of 2D gaussians.
+        pix_vels (Tensor): pixel velocities of 2D gaussians.
         radii (Tensor): radii of 2D gaussians
         conics (Tensor): conics (inverse of covariance) of 2D gaussians in upper triangular format
         num_tiles_hit (Tensor): number of tiles hit per gaussian
@@ -44,6 +47,7 @@ def rasterize_gaussians(
         block_width (int): MUST match whatever block width was used in the project_gaussians call. integer number of pixels between 2 and 16 inclusive
         background (Tensor): background color
         return_alpha (bool): whether to return alpha channel
+        rolling_shutter_time (float) Rolling shutter readout time, seconds
 
     Returns:
         A Tensor:
@@ -74,6 +78,7 @@ def rasterize_gaussians(
     return _RasterizeGaussians.apply(
         xys.contiguous(),
         depths.contiguous(),
+        pix_vels.contiguous(),
         radii.contiguous(),
         conics.contiguous(),
         num_tiles_hit.contiguous(),
@@ -84,6 +89,7 @@ def rasterize_gaussians(
         block_width,
         background.contiguous(),
         return_alpha,
+        rolling_shutter_time,
     )
 
 
@@ -95,6 +101,7 @@ class _RasterizeGaussians(Function):
         ctx,
         xys: Float[Tensor, "*batch 2"],
         depths: Float[Tensor, "*batch 1"],
+        pix_vels: Float[Tensor, "*batch 2"],
         radii: Float[Tensor, "*batch 1"],
         conics: Float[Tensor, "*batch 3"],
         num_tiles_hit: Int[Tensor, "*batch 1"],
@@ -105,6 +112,7 @@ class _RasterizeGaussians(Function):
         block_width: int,
         background: Float[Tensor, "channels"],
         return_alpha: Optional[bool] = False,
+        rolling_shutter_time: Optional[float] = 0,
     ) -> Tensor:
         num_points = xys.size(0)
         tile_bounds = (
@@ -155,6 +163,8 @@ class _RasterizeGaussians(Function):
                 gaussian_ids_sorted,
                 tile_bins,
                 xys,
+                pix_vels,
+                rolling_shutter_time,
                 conics,
                 colors,
                 opacity,
@@ -165,10 +175,12 @@ class _RasterizeGaussians(Function):
         ctx.img_height = img_height
         ctx.num_intersects = num_intersects
         ctx.block_width = block_width
+        ctx.rolling_shutter_time = rolling_shutter_time
         ctx.save_for_backward(
             gaussian_ids_sorted,
             tile_bins,
             xys,
+            pix_vels,
             conics,
             colors,
             opacity,
@@ -196,6 +208,7 @@ class _RasterizeGaussians(Function):
             gaussian_ids_sorted,
             tile_bins,
             xys,
+            pix_vels,
             conics,
             colors,
             opacity,
@@ -207,6 +220,7 @@ class _RasterizeGaussians(Function):
         if num_intersects < 1:
             v_xy = torch.zeros_like(xys)
             v_xy_abs = torch.zeros_like(xys)
+            v_pix_vels = torch.zeros_like(pix_vels)
             v_conic = torch.zeros_like(conics)
             v_colors = torch.zeros_like(colors)
             v_opacity = torch.zeros_like(opacity)
@@ -216,13 +230,15 @@ class _RasterizeGaussians(Function):
                 rasterize_fn = _C.rasterize_backward
             else:
                 rasterize_fn = _C.nd_rasterize_backward
-            v_xy, v_xy_abs, v_conic, v_colors, v_opacity = rasterize_fn(
+            v_xy, v_xy_abs, v_pix_vels, v_conic, v_colors, v_opacity = rasterize_fn(
                 img_height,
                 img_width,
                 ctx.block_width,
                 gaussian_ids_sorted,
                 tile_bins,
                 xys,
+                pix_vels,
+                ctx.rolling_shutter_time,
                 conics,
                 colors,
                 opacity,
@@ -246,6 +262,7 @@ class _RasterizeGaussians(Function):
         return (
             v_xy,  # xys
             None,  # depths
+            v_pix_vels, # pix vels
             None,  # radii
             v_conic,  # conics
             None,  # num_tiles_hit
@@ -256,4 +273,5 @@ class _RasterizeGaussians(Function):
             None,  # block_width
             v_background,  # background
             None,  # return_alpha
+            None, # rolling shutter time
         )

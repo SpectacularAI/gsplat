@@ -16,6 +16,9 @@ __global__ void project_gaussians_forward_kernel(
     const float3* __restrict__ scales,
     const float glob_scale,
     const float4* __restrict__ quats,
+    const float3 lin_vel,
+    const float3 ang_vel,
+    const float rolling_shutter_time,
     const float* __restrict__ viewmat,
     const float4 intrins,
     const dim3 img_size,
@@ -25,6 +28,7 @@ __global__ void project_gaussians_forward_kernel(
     float* __restrict__ covs3d,
     float2* __restrict__ xys,
     float* __restrict__ depths,
+    float2* __restrict__ pix_vels,
     int* __restrict__ radii,
     float3* __restrict__ conics,
     float* __restrict__ compensation,
@@ -40,12 +44,8 @@ __global__ void project_gaussians_forward_kernel(
     float3 p_world = means3d[idx];
     // printf("p_world %d %.2f %.2f %.2f\n", idx, p_world.x, p_world.y,
     // p_world.z);
-    float3 p_view;
-    if (clip_near_plane(p_world, viewmat, p_view, clip_thresh)) {
-        // printf("%d is out of frustum z %.2f, returning\n", idx, p_view.z);
-        return;
-    }
-    // printf("p_view %d %.2f %.2f %.2f\n", idx, p_view.x, p_view.y, p_view.z);
+    float3 p_view = transform_4x3(viewmat, p_world);
+    if (p_view.z <= clip_thresh) return;
 
     // compute the projected covariance
     float3 scale = scales[idx];
@@ -59,8 +59,6 @@ __global__ void project_gaussians_forward_kernel(
     // project to 2d with ewa approximation
     float fx = intrins.x;
     float fy = intrins.y;
-    float cx = intrins.z;
-    float cy = intrins.w;
     float tan_fovx = 0.5 * img_size.x / fx;
     float tan_fovy = 0.5 * img_size.y / fy;
     float3 cov2d;
@@ -80,7 +78,18 @@ __global__ void project_gaussians_forward_kernel(
     conics[idx] = conic;
 
     // compute the projected mean
-    float2 center = project_pix({fx, fy}, p_view, {cx, cy});
+    float cx = intrins.z;
+    float cy = intrins.w;
+    float2 focal_lengths = { fx, fy };
+    float2 center = project_pix(focal_lengths, p_view, {cx, cy});
+
+    float2 pix_vel = { 0, 0 };
+    if (rolling_shutter_time > 0) {
+        pix_vel = compute_pix_velocity(p_view, lin_vel, ang_vel, focal_lengths);
+        radius += sqrt(pix_vel.x * pix_vel.x + pix_vel.y * pix_vel.y) * 0.5 * rolling_shutter_time;
+    }
+    pix_vels[idx] = pix_vel;
+
     uint2 tile_min, tile_max;
     get_tile_bbox(center, radius, tile_bounds, tile_min, tile_max, block_width);
     int32_t tile_area = (tile_max.x - tile_min.x) * (tile_max.y - tile_min.y);
@@ -299,6 +308,8 @@ __global__ void rasterize_forward(
     const int32_t* __restrict__ gaussian_ids_sorted,
     const int2* __restrict__ tile_bins,
     const float2* __restrict__ xys,
+    const float2* __restrict__ pix_vels,
+    const float rolling_shutter_time,
     const float3* __restrict__ conics,
     const float3* __restrict__ colors,
     const float* __restrict__ opacities,
@@ -322,6 +333,8 @@ __global__ void rasterize_forward(
     float py = (float)i + 0.5;
     int32_t pix_id = i * img_size.x + j;
 
+    float roll_time = rolling_shutter_time * (py / img_size.y - 0.5);
+
     // return if out of bounds
     // keep not rasterizing threads around for reading data
     bool inside = (i < img_size.y && j < img_size.x);
@@ -336,6 +349,7 @@ __global__ void rasterize_forward(
 
     __shared__ int32_t id_batch[MAX_BLOCK_SIZE];
     __shared__ float3 xy_opacity_batch[MAX_BLOCK_SIZE];
+    __shared__ float2 pix_vel_batch[MAX_BLOCK_SIZE];
     __shared__ float3 conic_batch[MAX_BLOCK_SIZE];
 
     // current visibility left to render
@@ -364,7 +378,9 @@ __global__ void rasterize_forward(
             id_batch[tr] = g_id;
             const float2 xy = xys[g_id];
             const float opac = opacities[g_id];
+            const float2 pix_vel = pix_vels[g_id];
             xy_opacity_batch[tr] = {xy.x, xy.y, opac};
+            pix_vel_batch[tr] = { pix_vel.x, pix_vel.y };
             conic_batch[tr] = conics[g_id];
         }
 
@@ -376,8 +392,14 @@ __global__ void rasterize_forward(
         for (int t = 0; (t < batch_size) && !done; ++t) {
             const float3 conic = conic_batch[t];
             const float3 xy_opac = xy_opacity_batch[t];
+            const float2 pix_vel = pix_vel_batch[t];
             const float opac = xy_opac.z;
-            const float2 delta = {xy_opac.x - px, xy_opac.y - py};
+
+            const float2 delta = {
+                xy_opac.x + roll_time * pix_vel.x - px,
+                xy_opac.y + roll_time * pix_vel.y - py
+            };
+
             const float sigma = 0.5f * (conic.x * delta.x * delta.x +
                                         conic.z * delta.y * delta.y) +
                                 conic.y * delta.x * delta.y;

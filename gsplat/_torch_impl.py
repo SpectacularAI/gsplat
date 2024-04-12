@@ -347,6 +347,19 @@ def project_pix(fxfy, p_view, center, eps=1e-6):
     return torch.stack([u, v], dim=-1)
 
 
+def compute_pix_velocity(p_view, lin_vel, ang_vel, fxfy):
+    fx, fy = fxfy
+
+    rot_part = torch.cross(ang_vel.unsqueeze(0), p_view, dim=-1)
+    total_vel = lin_vel.unsqueeze(0) + rot_part
+
+    rz = 1.0 / p_view[..., 2]
+    out_x = -fx * (total_vel[..., 0] - total_vel[..., 2] * p_view[..., 0] * rz) * rz
+    out_y = -fy * (total_vel[..., 1] - total_vel[..., 2] * p_view[..., 1] * rz) * rz
+
+    return torch.stack([out_x, out_y], dim=-1)
+
+
 def clip_near_plane(p, viewmat, clip_thresh=0.01):
     R = viewmat[:3, :3]
     T = viewmat[:3, 3]
@@ -385,6 +398,9 @@ def project_gaussians_forward(
     scales,
     glob_scale,
     quats,
+    lin_vel,
+    ang_vel,
+    rolling_shutter_time,
     viewmat,
     intrins,
     img_size,
@@ -406,6 +422,13 @@ def project_gaussians_forward(
     )
     conic, radius, det_valid = compute_cov2d_bounds(cov2d, ~is_close)
     xys = project_pix((fx, fy), p_view, (cx, cy))
+
+    if rolling_shutter_time > 0:
+        pix_vel = compute_pix_velocity(p_view, lin_vel, ang_vel, (fx, fy))
+        radius += pix_vel.norm(dim=-1) * 0.5 * rolling_shutter_time
+    else:
+        pix_vel = torch.zeros_like(xys)
+
     tile_min, tile_max = get_tile_bbox(xys, radius, tile_bounds, block_width)
     tile_area = (tile_max[..., 0] - tile_min[..., 0]) * (
         tile_max[..., 1] - tile_min[..., 1]
@@ -434,6 +457,7 @@ def project_gaussians_forward(
         cov2d_triu,
         xys,
         depths,
+        pix_vel,
         radii,
         conic,
         compensation,

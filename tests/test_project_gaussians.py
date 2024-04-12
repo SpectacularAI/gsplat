@@ -63,9 +63,14 @@ def test_project_gaussians_forward():
     viewmat[:3, :3] = _torch_impl.quat_to_rotmat(torch.randn(4))
     BLOCK_SIZE = 16
 
+    linear_velocity = torch.randn(3, device=device)
+    angular_velocity = torch.randn(3, device=device)
+    rolling_shutter_time = 0.1
+
     (
         xys,
         depths,
+        pix_vels,
         radii,
         conics,
         compensation,
@@ -76,6 +81,9 @@ def test_project_gaussians_forward():
         scales,
         glob_scale,
         quats,
+        linear_velocity,
+        angular_velocity,
+        rolling_shutter_time,
         viewmat,
         fx,
         fy,
@@ -94,6 +102,7 @@ def test_project_gaussians_forward():
             _,
             _xys,
             _depths,
+            _pix_vels,
             _radii,
             _conics,
             _compensation,
@@ -104,6 +113,9 @@ def test_project_gaussians_forward():
             scales,
             glob_scale,
             quats,
+            linear_velocity,
+            angular_velocity,
+            rolling_shutter_time,
             viewmat,
             (fx, fy, cx, cy),
             (W, H),
@@ -150,11 +162,16 @@ def test_project_gaussians_backward():
 
     BLOCK_SIZE = 16
 
+    linear_velocity = torch.randn(3, device=device)
+    angular_velocity = torch.randn(3, device=device)
+    rolling_shutter_time = 0.1
+
     (
         cov3d,
         cov2d,
         xys,
         depths,
+        pix_vels,
         radii,
         conics,
         compensation,
@@ -165,6 +182,9 @@ def test_project_gaussians_backward():
         scales,
         glob_scale,
         quats,
+        linear_velocity,
+        angular_velocity,
+        rolling_shutter_time,
         viewmat,
         (fx, fy, cx, cy),
         (W, H),
@@ -177,6 +197,7 @@ def test_project_gaussians_backward():
     v_xys = torch.randn_like(xys)
     v_depths = torch.randn_like(depths)
     v_conics = torch.randn_like(conics)
+    v_pix_vels = torch.randn_like(pix_vels)
     # compensation gradients
     v_compensation = torch.randn_like(compensation)
     v_cov2d, v_cov3d, v_mean3d, v_scale, v_quat = _C.project_gaussians_backward(
@@ -185,6 +206,9 @@ def test_project_gaussians_backward():
         scales,
         glob_scale,
         quats,
+        tuple(list(linear_velocity.cpu().numpy())),
+        tuple(list(angular_velocity.cpu().numpy())),
+        rolling_shutter_time,
         viewmat,
         fx,
         fy,
@@ -198,6 +222,7 @@ def test_project_gaussians_backward():
         compensation,
         v_xys,
         v_depths,
+        v_pix_vels,
         v_conics,
         v_compensation,
     )
@@ -264,19 +289,25 @@ def test_project_gaussians_backward():
         depth = p_view[..., 2]
         return depth
 
+    def compute_pix_velocity_partial(mean3d):
+        p_view, _ = _torch_impl.clip_near_plane(mean3d, viewmat, clip_thresh)
+        return _torch_impl.compute_pix_velocity(p_view, linear_velocity, angular_velocity, (fx, fy))
+
     _, vjp_scale_rot_to_cov3d = vjp(scale_rot_to_cov3d_partial, scales, quats)  # type: ignore
     _, vjp_project_cov3d_ewa = vjp(project_cov3d_ewa_partial, means3d, cov3d)  # type: ignore
     _, vjp_compute_cov2d_bounds = vjp(compute_cov2d_bounds_partial, cov2d)  # type: ignore
     _, vjp_compute_compensation = vjp(compute_compensation_partial, cov2d)  # type: ignore
     _, vjp_project_pix = vjp(project_pix_partial, means3d)  # type: ignore
     _, vjp_compute_depth = vjp(compute_depth_partial, means3d)  # type: ignore
+    _, vjp_compute_pix_vels = vjp(compute_pix_velocity_partial, means3d)  # type: ignore
 
     _v_cov2d = vjp_compute_cov2d_bounds(v_conics)[0]
     _v_cov2d = _v_cov2d + vjp_compute_compensation(v_compensation)[0]
     _v_mean3d_cov2d, _v_cov3d = vjp_project_cov3d_ewa(_v_cov2d)
     _v_mean3d_xy = vjp_project_pix(v_xys)[0]
     _v_mean3d_depth = vjp_compute_depth(v_depths)[0]
-    _v_mean3d = _v_mean3d_cov2d + _v_mean3d_xy + _v_mean3d_depth
+    _v_mean3d_pix_vels = vjp_compute_pix_vels(v_pix_vels)[0]
+    _v_mean3d = _v_mean3d_cov2d + _v_mean3d_xy + _v_mean3d_depth + _v_mean3d_pix_vels
     _v_scale, _v_quat = vjp_scale_rot_to_cov3d(_v_cov3d)
 
     atol = 5e-4
