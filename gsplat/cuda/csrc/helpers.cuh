@@ -219,6 +219,8 @@ scale_to_mat(const float3 scale, const float glob_scale) {
     return S;
 }
 
+#define MAX_BLUR_SAMPLES 10
+
 inline __device__ float2 compute_pix_velocity(const float3 p_view, const float3 lin_vel, const float3 ang_vel, const float2 focal_lengths) {
     glm::vec3 ang_vel_glm(ang_vel.x, ang_vel.y, ang_vel.z);
     glm::vec3 lin_part(lin_vel.x, lin_vel.y, lin_vel.z);

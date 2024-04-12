@@ -406,6 +406,7 @@ def project_gaussians_forward(
     lin_vel,
     ang_vel,
     rolling_shutter_time,
+    exposure_time,
     viewmat,
     intrins,
     img_size,
@@ -428,9 +429,9 @@ def project_gaussians_forward(
     conic, radius, det_valid = compute_cov2d_bounds(cov2d, ~is_close)
     xys = project_pix((fx, fy), p_view, (cx, cy))
 
-    if rolling_shutter_time > 0:
+    if rolling_shutter_time > 0 or exposure_time > 0:
         pix_vel = compute_pix_velocity(p_view, lin_vel, ang_vel, (fx, fy))
-        radius += pix_vel.norm(dim=-1) * 0.5 * rolling_shutter_time
+        radius += pix_vel.norm(dim=-1) * 0.5 * (exposure_time + rolling_shutter_time)
     else:
         pix_vel = torch.zeros_like(xys)
 

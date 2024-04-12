@@ -19,6 +19,7 @@ __global__ void project_gaussians_forward_kernel(
     const float3 lin_vel,
     const float3 ang_vel,
     const float rolling_shutter_time,
+    const float exposure_time,
     const float* __restrict__ viewmat,
     const float4 intrins,
     const dim3 img_size,
@@ -84,9 +85,9 @@ __global__ void project_gaussians_forward_kernel(
     float2 center = project_pix(focal_lengths, p_view, {cx, cy});
 
     float2 pix_vel = { 0, 0 };
-    if (rolling_shutter_time > 0) {
+    if (rolling_shutter_time > 0 || exposure_time > 0) {
         pix_vel = compute_pix_velocity(p_view, lin_vel, ang_vel, focal_lengths);
-        radius += sqrt(pix_vel.x * pix_vel.x + pix_vel.y * pix_vel.y) * 0.5 * rolling_shutter_time;
+        radius += sqrt(pix_vel.x * pix_vel.x + pix_vel.y * pix_vel.y) * 0.5 * (exposure_time + rolling_shutter_time);
     }
     pix_vels[idx] = pix_vel;
 
@@ -305,11 +306,13 @@ __global__ void nd_rasterize_forward(
 __global__ void rasterize_forward(
     const dim3 tile_bounds,
     const dim3 img_size,
+    const unsigned n_blur_samples,
     const int32_t* __restrict__ gaussian_ids_sorted,
     const int2* __restrict__ tile_bins,
     const float2* __restrict__ xys,
     const float2* __restrict__ pix_vels,
     const float rolling_shutter_time,
+    const float exposure_time,
     const float3* __restrict__ conics,
     const float3* __restrict__ colors,
     const float* __restrict__ opacities,
@@ -333,12 +336,9 @@ __global__ void rasterize_forward(
     float py = (float)i + 0.5;
     int32_t pix_id = i * img_size.x + j;
 
-    float roll_time = rolling_shutter_time * (py / img_size.y - 0.5);
-
     // return if out of bounds
     // keep not rasterizing threads around for reading data
     bool inside = (i < img_size.y && j < img_size.x);
-    bool done = !inside;
 
     // have all threads in tile process the same gaussians in batches
     // first collect gaussians between range.x and range.y in batches
@@ -352,91 +352,106 @@ __global__ void rasterize_forward(
     __shared__ float2 pix_vel_batch[MAX_BLOCK_SIZE];
     __shared__ float3 conic_batch[MAX_BLOCK_SIZE];
 
-    // current visibility left to render
-    float T = 1.f;
-    // index of most recent gaussian to write to this thread's pixel
-    int cur_idx = 0;
-
-    // collect and process batches of gaussians
-    // each thread loads one gaussian at a time before rasterizing its
-    // designated pixel
-    int tr = block.thread_rank();
     float3 pix_out = {0.f, 0.f, 0.f};
-    for (int b = 0; b < num_batches; ++b) {
-        // resync all threads before beginning next batch
-        // end early if entire tile is done
-        if (__syncthreads_count(done) >= block_size) {
-            break;
-        }
+    float meanT = 0.0f;
 
-        // each thread fetch 1 gaussian from front to back
-        // index of gaussian to load
-        int batch_start = range.x + block_size * b;
-        int idx = batch_start + tr;
-        if (idx < range.y) {
-            int32_t g_id = gaussian_ids_sorted[idx];
-            id_batch[tr] = g_id;
-            const float2 xy = xys[g_id];
-            const float opac = opacities[g_id];
-            const float2 pix_vel = pix_vels[g_id];
-            xy_opacity_batch[tr] = {xy.x, xy.y, opac};
-            pix_vel_batch[tr] = { pix_vel.x, pix_vel.y };
-            conic_batch[tr] = conics[g_id];
-        }
+    assert(n_blur_samples <= MAX_BLUR_SAMPLES);
 
-        // wait for other threads to collect the gaussians in batch
-        block.sync();
+    float roll_time = rolling_shutter_time * (py / img_size.y - 0.5); // check sign
+    const float blur_avg_factor = 1.0f / n_blur_samples;
+    for (int32_t blur_i = 0; blur_i < MAX_BLUR_SAMPLES && blur_i < n_blur_samples; ++blur_i) {
+        float blur_rel = ((n_blur_samples > 1) ? (float(blur_i) / (n_blur_samples - 1) - 0.5f) * exposure_time : 0.0f) + roll_time;
+        bool done = !inside;
 
-        // process gaussians in the current batch for this pixel
-        int batch_size = min(block_size, range.y - batch_start);
-        for (int t = 0; (t < batch_size) && !done; ++t) {
-            const float3 conic = conic_batch[t];
-            const float3 xy_opac = xy_opacity_batch[t];
-            const float2 pix_vel = pix_vel_batch[t];
-            const float opac = xy_opac.z;
+        // current visibility left to render
+        float T = 1.f;
+        // index of most recent gaussian to write to this thread's pixel
+        int cur_idx = 0;
 
-            const float2 delta = {
-                xy_opac.x + roll_time * pix_vel.x - px,
-                xy_opac.y + roll_time * pix_vel.y - py
-            };
-
-            const float sigma = 0.5f * (conic.x * delta.x * delta.x +
-                                        conic.z * delta.y * delta.y) +
-                                conic.y * delta.x * delta.y;
-            const float alpha = min(0.999f, opac * __expf(-sigma));
-            if (sigma < 0.f || alpha < 1.f / 255.f) {
-                continue;
-            }
-
-            const float next_T = T * (1.f - alpha);
-            if (next_T <= 1e-4f) { // this pixel is done
-                // we want to render the last gaussian that contributes and note
-                // that here idx > range.x so we don't underflow
-                done = true;
+        // collect and process batches of gaussians
+        // each thread loads one gaussian at a time before rasterizing its
+        // designated pixel
+        int tr = block.thread_rank();
+        for (int b = 0; b < num_batches; ++b) {
+            // resync all threads before beginning next batch
+            // end early if entire tile is done
+            if (__syncthreads_count(done) >= block_size) {
                 break;
             }
 
-            int32_t g = id_batch[t];
-            const float vis = alpha * T;
-            const float3 c = colors[g];
-            pix_out.x = pix_out.x + c.x * vis;
-            pix_out.y = pix_out.y + c.y * vis;
-            pix_out.z = pix_out.z + c.z * vis;
-            T = next_T;
-            cur_idx = batch_start + t;
+            // each thread fetch 1 gaussian from front to back
+            // index of gaussian to load
+            int batch_start = range.x + block_size * b;
+            int idx = batch_start + tr;
+            if (idx < range.y) {
+                int32_t g_id = gaussian_ids_sorted[idx];
+                id_batch[tr] = g_id;
+                const float2 xy = xys[g_id];
+                const float opac = opacities[g_id];
+                const float2 pix_vel = pix_vels[g_id];
+                xy_opacity_batch[tr] = {xy.x, xy.y, opac};
+                pix_vel_batch[tr] = { pix_vel.x, pix_vel.y }; // TODO: combine with other batches
+                conic_batch[tr] = conics[g_id];
+            }
+
+            // wait for other threads to collect the gaussians in batch
+            block.sync();
+
+            // process gaussians in the current batch for this pixel
+            int batch_size = min(block_size, range.y - batch_start);
+            for (int t = 0; (t < batch_size) && !done; ++t) {
+                const float3 conic = conic_batch[t];
+                const float3 xy_opac = xy_opacity_batch[t];
+                const float2 pix_vel = pix_vel_batch[t];
+                const float opac = xy_opac.z;
+
+                const float2 delta = {
+                  xy_opac.x + blur_rel * pix_vel.x - px,
+                  xy_opac.y + blur_rel * pix_vel.y - py
+                };
+
+                const float sigma = 0.5f * (conic.x * delta.x * delta.x +
+                                            conic.z * delta.y * delta.y) +
+                                    conic.y * delta.x * delta.y;
+                const float alpha = min(0.999f, opac * __expf(-sigma));
+                if (sigma < 0.f || alpha < 1.f / 255.f) {
+                    continue;
+                }
+
+                const float next_T = T * (1.f - alpha);
+                if (next_T <= 1e-4f) { // this pixel is done
+                    // we want to render the last gaussian that contributes and note
+                    // that here idx > range.x so we don't underflow
+                    done = true;
+                    break;
+                }
+
+                int32_t g = id_batch[t];
+                const float vis = alpha * T * blur_avg_factor;
+                const float3 c = colors[g];
+                pix_out.x = pix_out.x + c.x * vis;
+                pix_out.y = pix_out.y + c.y * vis;
+                pix_out.z = pix_out.z + c.z * vis;
+                T = next_T;
+                cur_idx = batch_start + t;
+            }
+        }
+
+        meanT += T * blur_avg_factor;
+
+        if (inside) {
+            const int32_t blur_sample_id = pix_id * n_blur_samples + blur_i;
+            // add background
+            final_Ts[blur_sample_id] = T; // transmittance at last gaussian in this pixel
+            final_index[blur_sample_id] = cur_idx; // index of in bin of last gaussian in this pixel
         }
     }
 
     if (inside) {
-        // add background
-        final_Ts[pix_id] = T; // transmittance at last gaussian in this pixel
-        final_index[pix_id] =
-            cur_idx; // index of in bin of last gaussian in this pixel
-        float3 final_color;
-        final_color.x = pix_out.x + T * background.x;
-        final_color.y = pix_out.y + T * background.y;
-        final_color.z = pix_out.z + T * background.z;
-        out_img[pix_id] = final_color;
+        pix_out.x += meanT * background.x;
+        pix_out.y += meanT * background.y;
+        pix_out.z += meanT * background.z;
+        out_img[pix_id] = pix_out;
     }
 }
 

@@ -27,6 +27,7 @@ def test_map_gaussians():
     linear_velocity = torch.randn(3, device=device)
     angular_velocity = torch.randn(3, device=device)
     rolling_shutter_time = 0.1
+    exposure_time = 0.2
 
     BLOCK_SIZE = 16
     tile_bounds = (
@@ -54,6 +55,7 @@ def test_map_gaussians():
         linear_velocity,
         angular_velocity,
         rolling_shutter_time,
+        exposure_time,
         viewmat,
         (fx, fy, W / 2, H / 2),
         (H, W),

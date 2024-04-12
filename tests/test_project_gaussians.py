@@ -66,6 +66,7 @@ def test_project_gaussians_forward():
     linear_velocity = torch.randn(3, device=device)
     angular_velocity = torch.randn(3, device=device)
     rolling_shutter_time = 0.1
+    exposure_time = 0.2
 
     (
         xys,
@@ -84,6 +85,7 @@ def test_project_gaussians_forward():
         linear_velocity,
         angular_velocity,
         rolling_shutter_time,
+        exposure_time,
         viewmat,
         fx,
         fy,
@@ -116,6 +118,7 @@ def test_project_gaussians_forward():
             linear_velocity,
             angular_velocity,
             rolling_shutter_time,
+            exposure_time,
             viewmat,
             (fx, fy, cx, cy),
             (W, H),
@@ -165,6 +168,7 @@ def test_project_gaussians_backward():
     linear_velocity = torch.randn(3, device=device)
     angular_velocity = torch.randn(3, device=device)
     rolling_shutter_time = 0.1
+    exposure_time = 0.2
 
     (
         cov3d,
@@ -185,6 +189,7 @@ def test_project_gaussians_backward():
         linear_velocity,
         angular_velocity,
         rolling_shutter_time,
+        exposure_time,
         viewmat,
         (fx, fy, cx, cy),
         (W, H),
@@ -209,6 +214,7 @@ def test_project_gaussians_backward():
         tuple(list(linear_velocity.cpu().numpy())),
         tuple(list(angular_velocity.cpu().numpy())),
         rolling_shutter_time,
+        exposure_time,
         viewmat,
         fx,
         fy,

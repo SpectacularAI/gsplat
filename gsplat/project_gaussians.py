@@ -18,6 +18,7 @@ def project_gaussians(
     linear_velocity: Optional[Float[Tensor, "3"]],
     angular_velocity: Optional[Float[Tensor, "3"]],
     rolling_shutter_time: float,
+    exposure_time: float,
     viewmat: Float[Tensor, "4 4"],
     fx: float,
     fy: float,
@@ -85,6 +86,7 @@ def project_gaussians(
         v_lin,
         v_ang,
         rolling_shutter_time,
+        exposure_time,
         viewmat.contiguous(),
         fx,
         fy,
@@ -110,6 +112,7 @@ class _ProjectGaussians(Function):
         linear_velocity: Tuple[float, float, float],
         angular_velocity: Tuple[float, float, float],
         rolling_shutter_time: float,
+        exposure_time: float,
         viewmat: Float[Tensor, "4 4"],
         fx: float,
         fy: float,
@@ -142,6 +145,7 @@ class _ProjectGaussians(Function):
             linear_velocity,
             angular_velocity,
             rolling_shutter_time,
+            exposure_time,
             viewmat,
             fx,
             fy,
@@ -165,6 +169,7 @@ class _ProjectGaussians(Function):
         ctx.linear_velocity = linear_velocity
         ctx.angular_velocity = angular_velocity
         ctx.rolling_shutter_time = rolling_shutter_time
+        ctx.exposure_time = exposure_time
 
         # Save tensors.
         ctx.save_for_backward(
@@ -212,6 +217,7 @@ class _ProjectGaussians(Function):
             ctx.linear_velocity,
             ctx.angular_velocity,
             ctx.rolling_shutter_time,
+            ctx.exposure_time,
             viewmat,
             ctx.fx,
             ctx.fy,
@@ -282,6 +288,8 @@ class _ProjectGaussians(Function):
             # angular_velocity: Optional[Float[Tensor, "3"]],
             None,
             # rolling_shutter_time: float,
+            None,
+            # exposure_time: float,
             None,
             # viewmat: Float[Tensor, "4 4"],
             v_viewmat,
