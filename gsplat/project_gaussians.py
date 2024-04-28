@@ -2,13 +2,14 @@
 
 from typing import Optional, Tuple
 
+import numpy
 import torch
 from jaxtyping import Float
 from torch import Tensor
 from torch.autograd import Function
 
 import gsplat.cuda as _C
-
+from gsplat._torch_impl import project_gaussians_forward as torch_project_gaussians
 
 def project_gaussians(
     means3d: Float[Tensor, "*batch 3"],
@@ -70,13 +71,45 @@ def project_gaussians(
     if linear_velocity is None:
         assert angular_velocity is None
         assert rolling_shutter_time == 0
-        v_lin = (0, 0, 0)
-        v_ang = (0, 0, 0)
+        v_lin = torch.tensor([0, 0, 0], dtype=means3d.dtype)
+        v_ang = v_lin
+        use_torch = False
     else:
-        import numpy as np
         assert angular_velocity is not None
-        v_lin = tuple(np.ravel(linear_velocity.tolist()))
-        v_ang = tuple(np.ravel(angular_velocity.tolist()))
+        v_lin = linear_velocity
+        v_ang = angular_velocity
+        use_torch = linear_velocity.requires_grad or angular_velocity.requires_grad
+
+    if use_torch:
+        viewmat4x4 = torch.vstack([viewmat, torch.Tensor([[0, 0, 0, 1]]).to(viewmat)]).contiguous()
+        (
+            cov3d,
+            _cov2d,
+            xys,
+            depths,
+            pix_vels,
+            radii,
+            conics,
+            compensation,
+            num_tiles_hit,
+            _masks,
+        ) = torch_project_gaussians(
+            means3d.contiguous(),
+            scales.contiguous(),
+            glob_scale,
+            quats.contiguous(),
+            torch.ravel(v_lin),
+            torch.ravel(v_ang),
+            rolling_shutter_time,
+            exposure_time,
+            viewmat4x4,
+            (fx, fy, cx, cy),
+            (img_width, img_height),
+            block_width,
+            clip_thresh,
+        )
+
+        return (xys, depths, pix_vels, radii, conics, compensation, num_tiles_hit, cov3d)
 
     return _ProjectGaussians.apply(
         means3d.contiguous(),
@@ -109,8 +142,8 @@ class _ProjectGaussians(Function):
         scales: Float[Tensor, "*batch 3"],
         glob_scale: float,
         quats: Float[Tensor, "*batch 4"],
-        linear_velocity: Tuple[float, float, float],
-        angular_velocity: Tuple[float, float, float],
+        linear_velocity: Float[Tensor, "3"],
+        angular_velocity: Float[Tensor, "3"],
         rolling_shutter_time: float,
         exposure_time: float,
         viewmat: Float[Tensor, "4 4"],
@@ -142,8 +175,8 @@ class _ProjectGaussians(Function):
             scales,
             glob_scale,
             quats,
-            linear_velocity,
-            angular_velocity,
+            tuple(numpy.ravel(linear_velocity.detach().tolist())),
+            tuple(numpy.ravel(angular_velocity.detach().tolist())),
             rolling_shutter_time,
             exposure_time,
             viewmat,
@@ -214,8 +247,8 @@ class _ProjectGaussians(Function):
             scales,
             ctx.glob_scale,
             quats,
-            ctx.linear_velocity,
-            ctx.angular_velocity,
+            tuple(numpy.ravel(ctx.linear_velocity.tolist())),
+            tuple(numpy.ravel(ctx.angular_velocity.tolist())),
             ctx.rolling_shutter_time,
             ctx.exposure_time,
             viewmat,
