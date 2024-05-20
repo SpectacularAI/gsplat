@@ -353,7 +353,7 @@ def compute_pix_velocity(p_view, lin_vel, ang_vel, fxfy):
     rot_part = torch.cross(ang_vel.unsqueeze(0), p_view, dim=-1)
     total_vel = lin_vel.unsqueeze(0) + rot_part
 
-    rz = 1.0 / p_view[..., 2]
+    rz = 1.0 / (p_view[..., 2] + 1e-6)
     out_x = -fx * (total_vel[..., 0] - total_vel[..., 2] * p_view[..., 0] * rz) * rz
     out_y = -fy * (total_vel[..., 1] - total_vel[..., 2] * p_view[..., 1] * rz) * rz
 
